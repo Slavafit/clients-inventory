@@ -8,7 +8,7 @@ const userSchema = new mongoose.Schema({
     {
       product: String,
       quantity: Number,
-      price: Number
+      total: Number
     }
   ]
 });

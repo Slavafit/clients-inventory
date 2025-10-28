@@ -1,0 +1,25 @@
+{
+  "name": "clients-inventory",
+  "version": "1.0.0",
+  "description": "parcel inventory bot\r add form PC",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Slavafit/clients-inventory.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Slavafit/clients-inventory/issues"
+  },
+  "homepage": "https://github.com/Slavafit/clients-inventory#readme",
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}

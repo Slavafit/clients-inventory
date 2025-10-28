@@ -8,11 +8,13 @@ const Category = require('./models/Category');
 const Product = require('./models/Product');
 const User = require('./models/User');
 const Order = require('./models/Order');
+const { checkAuth, requestPhone } = require('./middlewares/checkAuth');
+const { registerAuthHandlers } = require('./handlers/auth');
 
 // --- Подключение к MongoDB ---
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('✅ MongoDB connected'))
-  .catch(err => console.error('MongoDB error:', err));
+  .catch(err => console.error('MongoDB error:', err.message));
 
 // --- Google Sheets API ---
 let sheetsClient = null;
@@ -59,29 +61,40 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.start(async (ctx) => {
   let user = await User.findOne({ telegramId: ctx.from.id });
 
-  if (!user) {
-    user = await User.create({ telegramId: ctx.from.id });
-    await ctx.reply('Привет! 👋 Для начала работы отправьте свой номер телефона:',
-      Markup.keyboard([[Markup.button.contactRequest('📱 Отправить номер')]]).oneTime().resize());
-  } else if (user.phone) {
-    await ctx.reply(`С возвращением, ${ctx.from.first_name}!`);
-    return showMainMenu(ctx);
-  } else {
-    await ctx.reply('Пожалуйста, отправьте номер телефона:');
+// 🆕 ВОЗВРАЩАЕМ ПРОВЕРКУ ТЕЛЕФОНА!
+  if (!user.phone) {
+    console.log(`[START DEBUG] Пользователь начал, но нет телефона. Запрашиваю.`);
+    await ctx.reply('Привет! 👋');
+    return requestPhone(ctx); // 🟢 Вызываем функцию из Middleware
   }
+    
+  // 2. Если пользователь и телефон есть, показываем меню.
+  console.log(`[START DEBUG] Пользователь авторизован. Показываю меню.`);
+  await ctx.reply(`С возвращением, ${ctx.from.first_name}!`);
+  return showMainMenu(ctx);
 });
+
 
 bot.on('contact', async (ctx) => {
   const phone = ctx.message.contact.phone_number;
   await User.findOneAndUpdate({ telegramId: ctx.from.id }, { phone });
-  await ctx.reply(`Ваш номер сохранён: ${phone}`);
+  console.log(`[CONTACT DEBUG] 4. Телефон ${phone} успешно СОХРАНЁН.`);
+  await ctx.reply(`Ваш номер сохранён: ${phone}`, Markup.removeKeyboard());
   return showMainMenu(ctx);
 });
+
+// 🟢 РЕГИСТРАЦИЯ ВСЕЙ ЛОГИКИ АВТОРИЗАЦИИ
+registerAuthHandlers(bot, User, showMainMenu);
+
+// --- Middleware для проверки авторизации ---
+// Передаем модель User в функцию middleware.
+bot.use(checkAuth(User));
 
 // --- Главное меню ---
 async function showMainMenu(ctx) {
   return ctx.reply('📋 Главное меню. Выберите действие:', Markup.keyboard([
-    ['📦 Создать опись', '🧾 Мои отправления']
+    ['📦 Создать опись', '🧾 Мои отправления'],
+    ['🔄 Изменить номер']
   ]).resize());
 }
 
@@ -92,6 +105,29 @@ async function startNewOrder(ctx) {
   await ctx.reply('Выберите категорию товара:', { reply_markup: { inline_keyboard: buttons } });
 }
 
+// --- Обработчик кнопки "Изменить номер" ---
+bot.hears('🔄 Изменить номер', async (ctx) => {
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    
+    // Сбрасываем текущий номер телефона в базе
+    user.phone = null; 
+    await user.save();
+    
+    // Запрашиваем новый номер. Middleware checkAuth автоматически 
+    // запросит его при следующем действии, но лучше запросить явно.
+    await ctx.reply('🗑 Текущий номер удалён. Для продолжения работы введите новый номер.');
+    return requestPhone(ctx);
+});
+
+// --- Переход к текстовому вводу номера ---
+bot.hears('✍️ Ввести другой номер', async (ctx) => {
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    
+    user.currentStep = 'awaiting_new_phone'; // 🆕 НОВЫЙ ШАГ ДИАЛОГА
+    await user.save();
+    
+    return ctx.reply('✍️ Введите номер телефона в международном формате (например, +79123456789):', Markup.removeKeyboard());
+});
 // --- Обработчик кнопки "Создать опись" ---
 bot.hears('📦 Создать опись', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
@@ -101,17 +137,26 @@ bot.hears('📦 Создать опись', async (ctx) => {
   await startNewOrder(ctx);
 });
 
+
 // --- Просмотр отправлений пользователя ---
 bot.hears('🧾 Мои отправления', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
-  if (!user) return ctx.reply('Сначала используйте /start.');
+  
+  // 1. Получаем текущий привязанный номер телефона
+  const currentPhone = user.phone; 
 
-  const orders = await Order.find({ userId: user._id });
-  if (!orders.length) return ctx.reply('📭 У вас пока нет отправлений.');
+  // 2. Находим ВСЕХ пользователей, которые используют этот номер
+  const usersWithSamePhone = await User.find({ phone: currentPhone }).select('_id');
+  const userIds = usersWithSamePhone.map(u => u._id);
 
-  let text = '📦 Ваши отправления:\n\n';
+  // 3. Ищем заказы, созданные ЛЮБЫМ из этих пользователей
+  const orders = await Order.find({ userId: { $in: userIds } }).sort({ timestamp: -1 });
+  
+  if (!orders.length) return ctx.reply(`📭 У вас пока нет отправлений, связанных с номером ${currentPhone}.`);
+
+  let text = `📦 Ваши отправления (по номеру ${currentPhone}):\n\n`;
   orders.forEach((o, i) => {
-     text += `#${i + 1} от ${o.timestamp.toLocaleString()} — ${o.totalSum.toFixed(2)}₽\n`; // <--- ИСПРАВЛЕНО НА o.totalSum
+     text += `#${i + 1} от ${o.timestamp.toLocaleString()} — ${o.totalSum.toFixed(2)}₽\n`;
   });
     await ctx.reply(text);
 });
@@ -140,7 +185,7 @@ bot.action(/prod_.+/, async (ctx) => {
     await user.save();
     await ctx.reply('Введите название своего товара:');
   } else {
-    user.currentOrder.push({ product: product.name });
+    user.currentOrder.push({ product: product.name, quantity: 0, total: 0 }); // <--- ИНИЦИАЛИЗАЦИЯ    
     user.currentStep = 'awaiting_quantity';
     await user.save();
     await ctx.reply(`Введите количество для "${product.name}" (в штуках):`);
@@ -150,13 +195,11 @@ bot.action(/prod_.+/, async (ctx) => {
 // --- Текстовые ответы пользователя ---
 bot.on('text', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
-  if (!user) return ctx.reply('Сначала нажмите /start');
-
   const text = ctx.message.text.trim();
 
   switch (user.currentStep) {
     case 'awaiting_custom_product':
-      user.currentOrder.push({ product: text });
+      user.currentOrder.push({ product: text, quantity: 0, total: 0 });
       user.currentStep = 'awaiting_quantity';
       await user.save();
       return ctx.reply('Введите количество:');
@@ -167,7 +210,7 @@ bot.on('text', async (ctx) => {
       user.currentOrder[user.currentOrder.length - 1].quantity = qty;
       user.currentStep = 'awaiting_total'; // <-- ИЗМЕНЕНО: awaiting_price -> awaiting_total
       await user.save();
-      return ctx.reply('💰 Введите *общую сумму* за эту позицию (например, 250.99):', { parse_mode: 'Markdown' }); // <-- ИЗМЕНЕНО: Текст запроса
+      return ctx.reply('💰 Введите *общую сумму* за эту позицию (например, 19.99):', { parse_mode: 'Markdown' }); // <-- ИЗМЕНЕНО: Текст запроса
 
       case 'awaiting_total':
       const total = parseFloat(text.replace(',', '.'));
@@ -176,7 +219,35 @@ bot.on('text', async (ctx) => {
         user.currentOrder[user.currentOrder.length - 1].total = total;
         user.currentStep = 'confirm_order';
         await user.save();
-        return showOrderPreview(ctx, user);
+      return showOrderPreview(ctx, user);
+
+      case 'awaiting_new_phone':
+        const text = ctx.message.text.trim();
+        // Регулярное выражение для очистки строки от всего, кроме цифр
+        const cleanedText = text.replace(/[^0-9]/g, ''); 
+      
+      // Проверка: Должно быть не менее 9 цифр (для большинства стран)
+      if (cleanedText.length < 9) {
+         return ctx.reply('Пожалуйста, введите корректный номер телефона (не менее 9 цифр).');
+      }
+
+     // Форматируем номер, добавляя '+' в начало, если его нет (для удобства поиска)
+        let formattedPhone = text.trim();
+        if (!formattedPhone.startsWith('+')) {
+            formattedPhone = '+' + formattedPhone;
+        }
+
+      // Сохраняем отформатированный номер
+      user.phone = formattedPhone;
+      user.currentStep = 'idle';
+      await user.save();
+      
+      await ctx.reply(`Ваш новый номер сохранён: ${formattedPhone}`);
+      return showMainMenu(ctx);
+
+        default:
+        // Если пользователь вводит произвольный текст, когда бот не ждет ответа.
+      return ctx.reply('🤔 Я не понимаю эту команду. Воспользуйтесь меню или выберите действие.');
   }
 });
 
@@ -187,10 +258,10 @@ async function showOrderPreview(ctx, user) {
         const itemTotal = i.total && !isNaN(i.total) ? i.total : 0; 
         
         // 2. Отображаем элемент
-        return `${idx + 1}. ${i.product} — ${i.quantity}шт, всего *${itemTotal.toFixed(2)}₽*`;
+        return `${idx + 1}. ${i.product} — ${i.quantity}шт, всего *${itemTotal.toFixed(2)}€*`;
     }).join('\n');
     // Общая сумма по описи - просто суммируем total из каждой позиции
-    const total = user.currentOrder.reduce((s, i) => s + i.total, 0);
+    const total = user.currentOrder.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
 
   const buttons = user.currentOrder.map((i, idx) => [
     { text: `🗑 Удалить ${i.product}`, callback_data: `del_${idx}` }
@@ -201,7 +272,7 @@ async function showOrderPreview(ctx, user) {
   ]);
   buttons.push([{ text: '❌ Отменить', callback_data: 'cancel_order' }]);
 
-  await ctx.reply(`📦 Текущая опись:\n\n${items}\n\nИтого: ${total.toFixed(2)}₽`, {
+  await ctx.reply(`📦 Текущая опись:\n\n${items}\n\nИтого: ${total.toFixed(2)}€`, {
     reply_markup: { inline_keyboard: buttons }
   });
 }
@@ -244,7 +315,7 @@ bot.action('send_order', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   if (!user || !user.currentOrder.length) return ctx.reply('Ошибка: нет товаров.');
 
-  const total = user.currentOrder.reduce((s, i) => s + i.quantity * i.price, 0);
+  const total = user.currentOrder.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
   const order = await Order.create({
     userId: user._id,
     items: user.currentOrder,
