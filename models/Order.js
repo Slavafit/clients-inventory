@@ -14,8 +14,8 @@ const orderSchema = new mongoose.Schema({
   totalSum: { type: Number, required: true }, // 💰 Общая сумма по всей описи
   status: { 
     type: String, 
-    enum: ['новое', 'в обработке', 'отправлено', 'доставлено', 'отменено'], 
-    default: 'новое' 
+    enum: ['nuevo', 'en tramito', 'enviado', 'entregado', 'cancelado'], 
+    default: 'nuevo' 
   } // 🚚 Статус отправления
 });
 

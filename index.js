@@ -57,32 +57,6 @@ if (process.env.USE_GOOGLE_SHEETS === 'true' && fs.existsSync(process.env.GOOGLE
 // --- Инициализация бота ---
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// --- Приветствие и регистрация ---
-bot.start(async (ctx) => {
-  let user = await User.findOne({ telegramId: ctx.from.id });
-
-// 🆕 ВОЗВРАЩАЕМ ПРОВЕРКУ ТЕЛЕФОНА!
-  if (!user.phone) {
-    console.log(`[START DEBUG] Пользователь начал, но нет телефона. Запрашиваю.`);
-    await ctx.reply('Привет! 👋');
-    return requestPhone(ctx); // 🟢 Вызываем функцию из Middleware
-  }
-    
-  // 2. Если пользователь и телефон есть, показываем меню.
-  console.log(`[START DEBUG] Пользователь авторизован. Показываю меню.`);
-  await ctx.reply(`С возвращением, ${ctx.from.first_name}!`);
-  return showMainMenu(ctx);
-});
-
-
-bot.on('contact', async (ctx) => {
-  const phone = ctx.message.contact.phone_number;
-  await User.findOneAndUpdate({ telegramId: ctx.from.id }, { phone });
-  console.log(`[CONTACT DEBUG] 4. Телефон ${phone} успешно СОХРАНЁН.`);
-  await ctx.reply(`Ваш номер сохранён: ${phone}`, Markup.removeKeyboard());
-  return showMainMenu(ctx);
-});
-
 // 🟢 РЕГИСТРАЦИЯ ВСЕЙ ЛОГИКИ АВТОРИЗАЦИИ
 registerAuthHandlers(bot, User, showMainMenu);
 
@@ -94,7 +68,7 @@ bot.use(checkAuth(User));
 async function showMainMenu(ctx) {
   return ctx.reply('📋 Главное меню. Выберите действие:', Markup.keyboard([
     ['📦 Создать опись', '🧾 Мои отправления'],
-    ['🔄 Изменить номер']
+    ['🔄 Изменить номер', '✏️ Мои черновики']
   ]).resize());
 }
 
@@ -105,29 +79,6 @@ async function startNewOrder(ctx) {
   await ctx.reply('Выберите категорию товара:', { reply_markup: { inline_keyboard: buttons } });
 }
 
-// --- Обработчик кнопки "Изменить номер" ---
-bot.hears('🔄 Изменить номер', async (ctx) => {
-    const user = await User.findOne({ telegramId: ctx.from.id });
-    
-    // Сбрасываем текущий номер телефона в базе
-    user.phone = null; 
-    await user.save();
-    
-    // Запрашиваем новый номер. Middleware checkAuth автоматически 
-    // запросит его при следующем действии, но лучше запросить явно.
-    await ctx.reply('🗑 Текущий номер удалён. Для продолжения работы введите новый номер.');
-    return requestPhone(ctx);
-});
-
-// --- Переход к текстовому вводу номера ---
-bot.hears('✍️ Ввести другой номер', async (ctx) => {
-    const user = await User.findOne({ telegramId: ctx.from.id });
-    
-    user.currentStep = 'awaiting_new_phone'; // 🆕 НОВЫЙ ШАГ ДИАЛОГА
-    await user.save();
-    
-    return ctx.reply('✍️ Введите номер телефона в международном формате (например, +79123456789):', Markup.removeKeyboard());
-});
 // --- Обработчик кнопки "Создать опись" ---
 bot.hears('📦 Создать опись', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
@@ -136,7 +87,6 @@ bot.hears('📦 Создать опись', async (ctx) => {
   await user.save();
   await startNewOrder(ctx);
 });
-
 
 // --- Просмотр отправлений пользователя ---
 bot.hears('🧾 Мои отправления', async (ctx) => {
@@ -154,21 +104,62 @@ bot.hears('🧾 Мои отправления', async (ctx) => {
       return ctx.reply('⚠️ Пожалуйста, сначала привяжите номер телефона.');
   }
 
-  // 2. Находим ВСЕХ пользователей, которые используют этот номер
-  const usersWithSamePhone = await User.find({ phone: currentPhone }).select('_id');
-  // Преобразуем найденные объекты пользователей в массив ID
-  const userIds = usersWithSamePhone.map(u => u._id);
-
   // 3. Ищем заказы НАПРЯМУЮ по полю clientPhone в модели Order
-  const orders = await Order.find({ clientPhone: currentPhone }).sort({ timestamp: -1 });
+  const orders = await Order.find({ 
+      clientPhone: currentPhone, 
+      status: { $ne: 'nuevo' } // 👈 ИСКЛЮЧАЕМ ЧЕРНОВИКИ
+  }).sort({ timestamp: -1 });
   
   if (!orders.length) return ctx.reply(`📭 У вас пока нет отправлений, связанных с номером ${currentPhone}.`);
 
   let text = `📦 Ваши отправления (по номеру ${currentPhone}):\n\n`;
   orders.forEach((o, i) => {
-     text += `#${i + 1} от ${o.timestamp.toLocaleString()} — ${o.totalSum.toFixed(2)}₽\n`;
+     text += `#${i + 1} от ${o.timestamp.toLocaleString()} — ${o.totalSum.toFixed(2)}€\n`;
   });
     await ctx.reply(text);
+});
+
+
+// --- Просмотр активных черновиков ---
+bot.hears('✏️ Мои черновики', async (ctx) => {
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    let currentPhone = user.phone;
+    
+    // Стандартизация номера
+    if (!currentPhone) {
+        return ctx.reply('⚠️ Сначала привяжите номер телефона.');
+    }
+    if (!currentPhone.startsWith('+')) {
+        currentPhone = '+' + currentPhone; 
+    }
+
+    // 1. Ищем все заказы со статусом 'новое' по номеру телефона
+    const drafts = await Order.find({ 
+        clientPhone: currentPhone, 
+        status: 'nuevo' // Только черновики
+    }).sort({ timestamp: -1 });
+
+    if (!drafts.length) {
+        return ctx.reply('🙌 У вас нет активных черновиков.');
+    }
+
+    let text = '✏️ Ваши активные черновики (нажмите, чтобы редактировать):\n\n';
+    
+    // 2. Создаем кнопки для каждого черновика
+    const draftButtons = drafts.map((d, i) => {
+        return [{ 
+            // Кнопка: "Черновик #1 от [дата] (Сумма)"
+            text: `Черновик #${i + 1} от ${d.timestamp.toLocaleDateString()} (${d.totalSum.toFixed(2)}€)`, 
+            // Используем уже существующий обработчик edit_order_...
+            callback_data: `edit_order_${d._id}` 
+        }];
+    });
+
+    await ctx.reply(text, {
+        reply_markup: {
+            inline_keyboard: draftButtons
+        }
+    });
 });
 
 // --- Обработка выбора категории ---
@@ -318,39 +309,139 @@ bot.action('cancel_order', async (ctx) => {
   await showMainMenu(ctx);
 });
 
-// --- Подтверждение и отправка ---
+// --- Подтверждение и отправка (Сохранить/Обновить Черновик) ---
 bot.action('send_order', async (ctx) => {
-  await ctx.answerCbQuery();
-  const user = await User.findOne({ telegramId: ctx.from.id });
-  if (!user || !user.currentOrder.length) return ctx.reply('Ошибка: нет товаров.');
+    await ctx.answerCbQuery();
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    if (!user || !user.currentOrder.length) return ctx.reply('Ошибка: нет товаров.');
 
-  const total = user.currentOrder.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
-  const currentPhone = user.phone;
-  const order = await Order.create({
-    userId: user._id,
-    clientPhone: currentPhone,
-    items: user.currentOrder,
-    totalSum: total
-  });
+    const total = user.currentOrder.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
+    const currentPhone = user.phone;
+    
+    let order;
 
-  if (sheetsClient) {
-    const values = [
-      [new Date().toLocaleString(), order.clientPhone, JSON.stringify(order.items), total]
-    ];
-    await sheetsClient.spreadsheets.values.append({
-      spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: 'Sheet1!A:D',
-      valueInputOption: 'USER_ENTERED',
-      requestBody: { values }
+    // 1. Проверяем, есть ли ID последнего черновика и не был ли он уже отправлен
+    if (user.lastOrderId) {
+        const existingOrder = await Order.findById(user.lastOrderId);
+
+        // Если черновик существует и имеет статус 'nuevo' (не отправлен)
+        if (existingOrder && existingOrder.status === 'nuevo') {
+            // Обновляем существующий черновик
+            order = await Order.findByIdAndUpdate(user.lastOrderId, {
+                clientPhone: currentPhone,
+                items: user.currentOrder,
+                totalSum: total,
+                // Статус остается 'nuevo'
+            }, { new: true });
+        }
+    }
+
+    // Если черновик не был обновлен (потому что lastOrderId не было или заказ был sent/cancelled)
+    if (!order) {
+        // 2. Создаем новый черновик
+        order = await Order.create({
+            userId: user._id,
+            clientPhone: currentPhone,
+            items: user.currentOrder,
+            totalSum: total,
+            status: 'nuevo' // Новый черновик всегда 'nuevo'
+        });
+    }
+
+    // Очищаем временную корзину
+    user.currentOrder = [];
+    user.currentStep = 'idle';
+    user.lastOrderId = order._id; // Обновляем/устанавливаем ID текущего черновика
+    await user.save();
+
+    await ctx.editMessageText(
+        `✅ Опись сохранена как *Черновик* (ID: ${order._id}). Вы можете её отредактировать.`,
+        { 
+            parse_mode: 'Markdown',
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: '✏️ Редактировать', callback_data: `edit_order_${order._id}` }],
+                    [{ text: '🚀 Окончательно отправить', callback_data: `final_send_${order._id}` }]
+                ]
+            }
+        }
+    );
+});
+
+// --- Редактирование заказа ---
+bot.action(/edit_order_.+/, async (ctx) => {
+    await ctx.answerCbQuery('Загружаю черновик для редактирования...');
+    
+    // Получаем ID заказа из callback_data
+    const orderId = ctx.match[0].replace('edit_order_', '');
+    
+    // Ищем заказ
+    const order = await Order.findById(orderId);
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    
+    // Проверка, что заказ существует и является черновиком
+    if (!order || order.status !== 'nuevo') {
+        return ctx.editMessageText('⚠️ Этот заказ нельзя редактировать (он либо не существует, либо уже отправлен).', { reply_markup: {} });
+    }
+    
+    // 1. Переносим содержимое заказа обратно во временную корзину пользователя
+    user.currentOrder = order.items;
+    user.lastOrderId = orderId; // Сохраняем ID редактируемого заказа
+    user.currentStep = 'idle'; 
+    await user.save();
+    
+    // 2. Обновляем сообщение, чтобы показать текущее состояние описи
+    await ctx.editMessageText(`✏️ Вы вернулись к редактированию заказа ID ${orderId}. Добавьте или удалите позиции.`);
+
+    // 3. Показываем предпросмотр, используя временную корзину
+    return showOrderPreview(ctx, user); 
+});
+
+// --- Окончательная отправка заказа ---
+bot.action(/final_send_.+/, async (ctx) => {
+    await ctx.answerCbQuery('Отправляю заказ...');
+    
+    // Получаем ID заказа из callback_data
+    const orderId = ctx.match[0].replace('final_send_', '');
+    
+    // Ищем заказ по ID
+    const order = await Order.findById(orderId);
+
+    // Проверка, что заказ существует и еще не был отправлен
+    if (!order || order.status !== 'nuevo') {
+        return ctx.editMessageText('⚠️ Ошибка: Заказ не найден или уже отправлен.', { reply_markup: {} });
+    }
+    
+    // 1. Отправляем в Google Sheets
+    if (sheetsClient) {
+        const total = order.totalSum;
+        const values = [
+            [new Date().toLocaleString(), order.clientPhone, JSON.stringify(order.items), total]
+        ];
+        
+        try {
+            await sheetsClient.spreadsheets.values.append({
+                spreadsheetId: process.env.GOOGLE_SHEET_ID,
+                range: 'Sheet1!A:D',
+                valueInputOption: 'USER_ENTERED',
+                requestBody: { values }
+            });
+        } catch (error) {
+            console.error('Ошибка записи в Google Sheets:', error);
+            // Продолжаем, даже если Google Sheets не сработал
+        }
+    }
+
+    // 2. Меняем статус на "отправлен"
+    order.status = 'enviado'; 
+    await order.save();
+    
+    // Обновляем сообщение в чате
+    await ctx.editMessageText(`🚀 Опись ID ${orderId} *окончательно отправлена*! Изменения больше невозможны.`, { 
+        parse_mode: 'Markdown',
+        reply_markup: {} // Удаляем inline-кнопки
     });
-  }
-
-  user.currentOrder = [];
-  user.currentStep = 'idle';
-  await user.save();
-
-  await ctx.reply('✅ Опись успешно отправлена!');
-  await showMainMenu(ctx);
+    await showMainMenu(ctx);
 });
 
 // --- Глобальный обработчик ошибок ---
