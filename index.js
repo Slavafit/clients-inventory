@@ -144,13 +144,23 @@ bot.hears('🧾 Мои отправления', async (ctx) => {
   
   // 1. Получаем текущий привязанный номер телефона
   const currentPhone = user.phone; 
+  // Стандартизация номера для поиска (для избежания "+7" vs "7")
+  if (currentPhone && !currentPhone.startsWith('+')) {
+      currentPhone = '+' + currentPhone; 
+  }
+  
+  // ❌ Если телефона нет (теоретически невозможно из-за middleware), выходим
+  if (!currentPhone) {
+      return ctx.reply('⚠️ Пожалуйста, сначала привяжите номер телефона.');
+  }
 
   // 2. Находим ВСЕХ пользователей, которые используют этот номер
   const usersWithSamePhone = await User.find({ phone: currentPhone }).select('_id');
+  // Преобразуем найденные объекты пользователей в массив ID
   const userIds = usersWithSamePhone.map(u => u._id);
 
-  // 3. Ищем заказы, созданные ЛЮБЫМ из этих пользователей
-  const orders = await Order.find({ userId: { $in: userIds } }).sort({ timestamp: -1 });
+  // 3. Ищем заказы НАПРЯМУЮ по полю clientPhone в модели Order
+  const orders = await Order.find({ clientPhone: currentPhone }).sort({ timestamp: -1 });
   
   if (!orders.length) return ctx.reply(`📭 У вас пока нет отправлений, связанных с номером ${currentPhone}.`);
 
@@ -222,7 +232,6 @@ bot.on('text', async (ctx) => {
       return showOrderPreview(ctx, user);
 
       case 'awaiting_new_phone':
-        const text = ctx.message.text.trim();
         // Регулярное выражение для очистки строки от всего, кроме цифр
         const cleanedText = text.replace(/[^0-9]/g, ''); 
       
@@ -316,15 +325,17 @@ bot.action('send_order', async (ctx) => {
   if (!user || !user.currentOrder.length) return ctx.reply('Ошибка: нет товаров.');
 
   const total = user.currentOrder.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
+  const currentPhone = user.phone;
   const order = await Order.create({
     userId: user._id,
+    clientPhone: currentPhone,
     items: user.currentOrder,
     totalSum: total
   });
 
   if (sheetsClient) {
     const values = [
-      [new Date().toLocaleString(), user.phone, JSON.stringify(order.items), total]
+      [new Date().toLocaleString(), order.clientPhone, JSON.stringify(order.items), total]
     ];
     await sheetsClient.spreadsheets.values.append({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
