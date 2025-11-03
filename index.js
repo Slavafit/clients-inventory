@@ -9,6 +9,7 @@ const Product = require('./models/Product');
 const User = require('./models/User');
 const Order = require('./models/Order');
 const { checkAuth, requestPhone } = require('./middlewares/checkAuth');
+const { checkAdmin } = require('./middlewares/checkAdmin');
 const { registerAuthHandlers } = require('./handlers/auth');
 
 // --- Подключение к MongoDB ---
@@ -35,7 +36,6 @@ if (process.env.USE_GOOGLE_SHEETS === 'true' && fs.existsSync(process.env.GOOGLE
         range: 'Sheet1!A1:D1',
       });
       if (!res.data.values || res.data.values.length === 0) {
-        console.log('🆕 Создаю заголовки таблицы...');
         await sheetsClient.spreadsheets.values.update({
           spreadsheetId: sheetId,
           range: 'Sheet1!A1:D1',
@@ -72,12 +72,98 @@ async function showMainMenu(ctx) {
   ]).resize());
 }
 
+// функция для вывода списка категорий
+async function showCategorySelection(ctx) {
+  const categories = await Category.find({});
+
+  if (!categories.length) {
+      return ctx.reply('⚠️ Сначала необходимо добавить категории с помощью команды /addcat.');
+  }
+
+  // Создаем массив inline-кнопок
+  const categoryButtons = categories.map(cat => {
+      return [
+          { 
+              text: `${cat.emoji} ${cat.name}`, 
+              callback_data: `select_cat_prod_${cat._id}` // Кнопка для выбора категории для товара
+          }
+      ];
+  });
+
+  return ctx.reply('📂 Выберите категорию для нового товара:', {
+      reply_markup: {
+          inline_keyboard: categoryButtons
+      }
+  });
+}
+
 // --- Старт создания описи ---
 async function startNewOrder(ctx) {
   const categories = await Category.find();
   const buttons = categories.map(c => [{ text: `${c.emoji} ${c.name}`, callback_data: `cat_${c._id}` }]);
   await ctx.reply('Выберите категорию товара:', { reply_markup: { inline_keyboard: buttons } });
 }
+
+// --- Функция предпросмотра и редактирования описи ---
+async function showOrderPreview(ctx, user) {
+  const items = user.currentOrder.map((i, idx) => {
+      // 1. Проверяем, существует ли i.total. Если нет, используем 0.
+      const itemTotal = i.total && !isNaN(i.total) ? i.total : 0; 
+      
+      // 2. Отображаем элемент
+      return `${idx + 1}. ${i.product} — ${i.quantity}шт, всего *${itemTotal.toFixed(2)}€*`;
+  }).join('\n');
+  // Общая сумма по описи - просто суммируем total из каждой позиции
+  const total = user.currentOrder.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
+
+const buttons = user.currentOrder.map((i, idx) => [
+  { text: `🗑 Удалить ${i.product}`, callback_data: `del_${idx}` }
+]);
+buttons.push([
+  { text: '➕ Добавить товар', callback_data: 'add_more' },
+  { text: '✅ Отправить опись', callback_data: 'send_order' }
+]);
+buttons.push([{ text: '❌ Отменить', callback_data: 'cancel_order' }]);
+
+await ctx.reply(`📦 Текущая опись:\n\n${items}\n\nИтого: ${total.toFixed(2)}€`, {
+  reply_markup: { inline_keyboard: buttons }
+});
+}
+
+// --- Обработчик для установки роли администратора (ТОЛЬКО ДЛЯ ПЕРВОНАЧАЛЬНОЙ НАСТРОЙКИ!) ---
+// Установите свой Telegram ID в BOT_ADMIN_ID в .env файле
+// bot.command('setadmin', async (ctx) => {
+//   if (ctx.from.id.toString() === process.env.BOT_ADMIN_ID) {
+//       await User.findOneAndUpdate({ telegramId: ctx.from.id }, { role: 'admin' }, { upsert: true });
+//       return ctx.reply('🎉 Вы назначены администратором!');
+//   }
+//   return ctx.reply('⛔ Недостаточно прав.');
+// });
+
+// --- Команды для администратора: Добавление категорий и товаров ---
+// 🆕 Middleware checkAdmin
+bot.command('addcat', checkAdmin(User), async (ctx) => {
+  // Устанавливаем шаг для ожидания названия категории
+  const user = await User.findOne({ telegramId: ctx.from.id });
+  user.currentStep = 'awaiting_category_name';
+  await user.save();
+  return ctx.reply('📝 Введите название новой категории:');
+});
+
+// 🆕 Middleware checkAdmin используется здесь
+bot.command('addprod', checkAdmin(User), async (ctx) => {
+  // Запускаем процесс добавления товара
+  const user = await User.findOne({ telegramId: ctx.from.id });
+  user.currentStep = 'awaiting_product_category';
+  await user.save();
+  return showCategorySelection(ctx); // Ваша функция для показа списка категорий
+});
+
+bot.on('callback_query', async (ctx, next) => {
+    // 🟢 ВЫВОДИМ В ТЕРМИНАЛ НАЖАТУЮ КНОПКУ
+    console.log(`[ACTION DEBUG] Received callback_data: ${ctx.callbackQuery.data}`);
+    return next();
+});
 
 // --- Обработчик кнопки "Создать опись" ---
 bot.hears('📦 Создать опись', async (ctx) => {
@@ -164,14 +250,32 @@ bot.hears('✏️ Мои черновики', async (ctx) => {
 
 // --- Обработка выбора категории ---
 bot.action(/cat_.+/, async (ctx) => {
+  // 🟢 ДОБАВЛЯЕМ ПРОВЕРКУ ПРЕФИКСА
+  if (!ctx.match[0].startsWith('cat_')) {
+    await ctx.answerCbQuery('⚠️ Ошибка: Неверный тип действия.');
+    // Предотвращаем дальнейшее выполнение кода, которое приведет к ошибке
+    return; 
+}
   const categoryId = ctx.match[0].replace('cat_', '');
+  // 🟢 ДОБАВЛЯЕМ ПРОВЕРКУ КОРРЕКТНОСТИ ID
+  if (!mongoose.Types.ObjectId.isValid(categoryId)) {
+    await ctx.answerCbQuery('⚠️ Ошибка: Некорректный ID категории.');
+    console.error('ООшибка: Некорректный ID категории', (categoryId));
+
+    return;
+}
+
   const category = await Category.findById(categoryId);
+  // 2. Находим товары
   const products = await Product.find({ categoryId });
+  // 3. Готовим кнопки товаров
 
   const buttons = products.map(p => [{ text: p.name, callback_data: `prod_${p._id}` }]);
-  await ctx.reply(`Категория *${category.emoji} ${category.name}*`, {
-    parse_mode: 'Markdown',
-    reply_markup: { inline_keyboard: buttons }
+  const messageText = `📝 Вы выбрали категорию *${category.emoji} ${category.name}*. Выберите товар для добавления в опись:`;
+  await ctx.editMessageText(messageText, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: buttons }
+
   });
 });
 
@@ -193,12 +297,71 @@ bot.action(/prod_.+/, async (ctx) => {
   }
 });
 
+// --- Обработка выбора категории для добавления товара ---
+bot.action(/select_cat_prod_.+/, checkAdmin(User), async (ctx) => {
+  await ctx.answerCbQuery();
+  
+  const categoryId = ctx.match[0].replace('select_cat_prod_', '');
+      // 🟢 ДОБАВЛЯЕМ ПРОВЕРКУ ID
+    try {
+      if (!mongoose.Types.ObjectId.isValid(categoryId)) {
+        await ctx.editMessageText('⚠️ Ошибка: Некорректный ID категории. Перезапустите команду /addprod.');
+        return;
+    }
+      const user = await User.findOne({ telegramId: ctx.from.id });
+      
+      // 1. Сохраняем ID категории и переходим к ожиданию названия товара
+      user.currentStep = 'awaiting_product_name';
+      // 💡 Предполагается, что вы добавили поле tempCategoryId в User.js
+      user.tempCategoryId = categoryId; 
+      await user.save();
+
+      const category = await Category.findById(categoryId);
+      
+      await ctx.editMessageText(`📝 Категория "${category.name}" выбрана. Теперь введите название нового товара:`);
+    } catch (error) {
+      console.error('Ошибка в админ-обработчике select_cat_prod_:', error);
+      // 🟢 Если ошибка CastError, это значит, что сюда провалился неверный ID.
+    if (error.name === 'CastError') {
+      return ctx.editMessageText('⚠️ Ошибка данных: Пожалуйста, очистите чат и перезапустите /addprod. Возможно, вы нажали на старую кнопку.');
+    }
+    return ctx.editMessageText('❌ Произошла непредвиденная ошибка при выборе категории.');
+  }
+});
+
 // --- Текстовые ответы пользователя ---
 bot.on('text', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   const text = ctx.message.text.trim();
 
   switch (user.currentStep) {
+
+    // 🆕 АДМИН: Ожидание названия категории
+    case 'awaiting_category_name':
+      // 1. Создаем новую категорию
+      const newCategory = await Category.create({ name: text });
+        
+      // 2. Сбрасываем шаг
+      user.currentStep = 'idle';
+      await user.save();
+      
+      return ctx.reply(`✅ Категория "${newCategory.name}" успешно добавлена!`);
+
+    // 🆕 АДМИН: Ожидание названия товара
+    case 'awaiting_product_name':
+      // 1. Создаем новый товар, используя сохраненный ID категории
+      const newProduct = await Product.create({
+        categoryId: user.tempCategoryId,
+        name: text
+      });
+
+      // 2. Очищаем временное поле и сбрасываем шаг
+      user.tempCategoryId = null; 
+      user.currentStep = 'idle';
+      await user.save();
+
+    return ctx.reply(`✅ Товар "${newProduct.name}" успешно добавлен!`);
+
     case 'awaiting_custom_product':
       user.currentOrder.push({ product: text, quantity: 0, total: 0 });
       user.currentStep = 'awaiting_quantity';
@@ -251,31 +414,7 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// --- Функция предпросмотра и редактирования описи ---
-async function showOrderPreview(ctx, user) {
-    const items = user.currentOrder.map((i, idx) => {
-        // 1. Проверяем, существует ли i.total. Если нет, используем 0.
-        const itemTotal = i.total && !isNaN(i.total) ? i.total : 0; 
-        
-        // 2. Отображаем элемент
-        return `${idx + 1}. ${i.product} — ${i.quantity}шт, всего *${itemTotal.toFixed(2)}€*`;
-    }).join('\n');
-    // Общая сумма по описи - просто суммируем total из каждой позиции
-    const total = user.currentOrder.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
 
-  const buttons = user.currentOrder.map((i, idx) => [
-    { text: `🗑 Удалить ${i.product}`, callback_data: `del_${idx}` }
-  ]);
-  buttons.push([
-    { text: '➕ Добавить товар', callback_data: 'add_more' },
-    { text: '✅ Отправить опись', callback_data: 'send_order' }
-  ]);
-  buttons.push([{ text: '❌ Отменить', callback_data: 'cancel_order' }]);
-
-  await ctx.reply(`📦 Текущая опись:\n\n${items}\n\nИтого: ${total.toFixed(2)}€`, {
-    reply_markup: { inline_keyboard: buttons }
-  });
-}
 
 // --- Удаление товара из описи ---
 bot.action(/del_\d+/, async (ctx) => {

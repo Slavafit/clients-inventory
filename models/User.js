@@ -5,6 +5,12 @@ const userSchema = new mongoose.Schema({
   phone: { type: String },
   currentStep: { type: String, default: 'idle' },
   lastOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
+  role: { 
+    type: String, 
+    enum: ['user', 'admin'],
+    default: 'user' 
+  },
+  tempCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
   currentOrder: [
     {
       product: String,
