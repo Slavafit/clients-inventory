@@ -3,8 +3,13 @@ const { requestPhone } = require('../middlewares/checkAuth'); // Импорти�
 
 // --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ И СОХРАНЕНИЯ КОНТАКТА ---
 const handleContact = (User, showMainMenu) => async (ctx) => {
-    const phone = ctx.message.contact.phone_number;
+    let phone = ctx.message.contact.phone_number;
     await User.findOneAndUpdate({ telegramId: ctx.from.id }, { phone });
+    
+    // 🟢 ДОБАВЛЯЕМ + ПРИ СОХРАНЕНИИ
+    if (!phone.startsWith('+')) {
+        phone = '+' + phone;
+    }
     
     // Удаляем временную клавиатуру запроса контакта
     await ctx.reply(`Ваш номер сохранён: ${phone}`, Markup.removeKeyboard());

@@ -10,6 +10,7 @@ const userSchema = new mongoose.Schema({
     enum: ['user', 'admin'],
     default: 'user' 
   },
+  tempProductName: { type: String },
   tempCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
   currentOrder: [
     {
