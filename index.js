@@ -313,14 +313,18 @@ bot.on('text', async (ctx) => {
       user.tempProductName = text;
       // 2. ожидание выбора категории
       user.currentStep = 'awaiting_category_selection';
+        console.log(`[ACTION DEBUG] case:awaiting_product_name: ${text}`);
 
       await user.save();
       // 3. Показываем категории
       return showCategorySelection(ctx);
 
+
     // 🆕 АДМИН: Ожидание названия категории
     case 'awaiting_category_name':
       // 1. Создаем новую категорию
+        console.log(`[ACTION DEBUG] case:awaiting_category_name: ${text}`);
+
       const newCategory = await Category.create({ name: text });
         
       // 2. Сбрасываем шаг
@@ -404,6 +408,8 @@ bot.action(/select_cat_final_.+/, checkAdmin(User), async (ctx) => {
         
         if (!productName) {
             user.currentStep = 'idle';
+              console.log(`productName:${productName}`);
+
             await user.save();
             return ctx.editMessageText('⚠️ Ошибка: Название товара потеряно. Начните снова с /addprod.');
         }
