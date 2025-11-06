@@ -11,6 +11,7 @@ const Order = require('./models/Order');
 const { checkAuth, requestPhone } = require('./middlewares/checkAuth');
 const { checkAdmin } = require('./middlewares/checkAdmin');
 const { registerAuthHandlers } = require('./handlers/auth');
+const { callbackDebug } = require('./middlewares/callbackDebug');
 
 // --- Подключение к MongoDB ---
 mongoose.connect(process.env.MONGO_URI)
@@ -63,6 +64,8 @@ registerAuthHandlers(bot, User, showMainMenu);
 // --- Middleware для проверки авторизации ---
 // Передаем модель User в функцию middleware.
 bot.use(checkAuth(User));
+// --- Middleware для отладки
+bot.use(callbackDebug());
 
 // --- Главное меню ---
 async function showMainMenu(ctx) {
@@ -253,17 +256,20 @@ bot.hears('✏️ Мои черновики', async (ctx) => {
 
 // --- Обработка выбора категории ---
 bot.action(/cat_.+/, async (ctx) => {
-  // 🟢 ДОБАВЛЯЕМ ПРОВЕРКУ ПРЕФИКСА
-  if (!ctx.match[0].startsWith('cat_')) {
-    await ctx.answerCbQuery('⚠️ Ошибка: Неверный тип действия.');
-    // Предотвращаем дальнейшее выполнение кода, которое приведет к ошибке
-    return; 
-}
-  const categoryId = ctx.match[0].replace('cat_', '');
+  await ctx.answerCbQuery();
+  const callbackData = ctx.match[0];
+  // 🛑 ИЗОЛЯЦИЯ: Если это действие администратора, немедленно выходим!
+    if (callbackData.startsWith('cat_final_')) {
+              console.log(`[ACTION DEBUG]  ИЗОЛЯЦИЯ: Если это действие администратора`);
+        // Мы просто игнорируем это здесь, обработчик администратора займется этим.
+        return; 
+    }
+
+  const categoryId = callbackData.split('_').pop();
   // 🟢 ДОБАВЛЯЕМ ПРОВЕРКУ КОРРЕКТНОСТИ ID
   if (!mongoose.Types.ObjectId.isValid(categoryId)) {
     await ctx.answerCbQuery('⚠️ Ошибка: Некорректный ID категории.');
-    console.error('Ошибка: Некорректный ID категории', (categoryId));
+    console.error('Ошибка: Некорректный ID категории:', (categoryId));
 
     return;
 }
@@ -386,7 +392,7 @@ bot.on('text', async (ctx) => {
 });
 
 
-bot.action(/select_cat_final_.+/, checkAdmin(User), async (ctx) => {
+bot.action(/cat_final_.+|select_cat_final_.+/, checkAdmin(User), async (ctx) => {
     await ctx.answerCbQuery();
     
     // 1. Извлекаем полную строку callback_data
@@ -394,6 +400,7 @@ bot.action(/select_cat_final_.+/, checkAdmin(User), async (ctx) => {
     // 🟢 ИСПРАВЛЕНИЕ: Используем стандартный replace, чтобы гарантировать удаление префикса.
     // Если здесь возникнет проблема, возможно, в callbackData есть лишние символы.
     const categoryId = callbackData.split('_').pop();
+          console.log(`callbackData.split:${categoryId}`);
 
     // 2. Проверка ID (теперь с более полезным сообщением об ошибке)
     if (!mongoose.Types.ObjectId.isValid(categoryId)) {
@@ -419,9 +426,9 @@ bot.action(/select_cat_final_.+/, checkAdmin(User), async (ctx) => {
             categoryId: categoryId,
             name: productName
         });
-          console.log(`Создаем новый товар - category name:${category.name}`);
 
         const category = await Category.findById(categoryId);
+          console.log(`Создаем новый товар - category name:${category.name}`);
 
         // 4. Очистка и завершение
         user.tempProductName = null; 
