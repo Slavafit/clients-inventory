@@ -10,7 +10,7 @@ const callbackDebug = () => async (ctx, next) => {
         if (originalData !== ctx.callbackQuery.data) {
             console.log(`[MIDDLEWARE-CLEANUP] Data changed from: ${originalData} to: ${ctx.callbackQuery.data}`);
         }
-        console.log(`[MIDDLEWARE-DEBUG] Final callback_data: ${ctx.callbackQuery.data}`);
+        //console.log(`[MIDDLEWARE-DEBUG] Final callback_data: ${ctx.callbackQuery.data}`);
     }
     
     return next();

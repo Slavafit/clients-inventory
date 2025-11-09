@@ -21,9 +21,6 @@ const handleContact = (User, showMainMenu) => async (ctx) => {
 const handleChangePhone = (User) => async (ctx) => {
     const user = await User.findOne({ telegramId: ctx.from.id });
     
-    // Сбрасываем текущий номер телефона в базе
-    user.phone = null; 
-    
     // Сразу переводим в шаг ожидания ввода
     user.currentStep = 'awaiting_new_phone'; 
     
@@ -38,14 +35,19 @@ const registerAuthHandlers = (bot, User, showMainMenu) => {
     
     // 1. Обработчик /start
     bot.start(async (ctx) => {
+            console.log('DEBUG: /start вызван');
+
         let user = await User.findOne({ telegramId: ctx.from.id });
 
         if (!user) {
             user = await User.create({ telegramId: ctx.from.id });
+                    console.log('DEBUG: Создан новый пользователь');
+
         } 
         
         // Если телефон отсутствует, запрашиваем его.
-        if (!user.phone) {
+        if (!user.phone || user.phone === 'null' || user.phone === '') {
+    console.log('DEBUG: Нет телефона, вызываем requestPhone');
             await ctx.reply('Привет! 👋');
             return requestPhone(ctx); 
         }
@@ -60,6 +62,9 @@ const registerAuthHandlers = (bot, User, showMainMenu) => {
 
     // 3. Обработчик смены номера (кнопка в главном меню)
     bot.hears('🔄 Изменить номер', handleChangePhone(User));
+
+    // 4. Обработчик кнопки "Ввести другой номер"
+    bot.hears('✍️ Ввести другой номер', handleChangePhone(User))
 };
 
 module.exports = {

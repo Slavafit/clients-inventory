@@ -8,7 +8,7 @@ const Category = require('./models/Category');
 const Product = require('./models/Product');
 const User = require('./models/User');
 const Order = require('./models/Order');
-const { checkAuth, requestPhone } = require('./middlewares/checkAuth');
+const { checkAuth } = require('./middlewares/checkAuth');
 const { checkAdmin } = require('./middlewares/checkAdmin');
 const { registerAuthHandlers } = require('./handlers/auth');
 const { callbackDebug } = require('./middlewares/callbackDebug');
@@ -66,7 +66,6 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 registerAuthHandlers(bot, User, showMainMenu);
 
 // --- Middleware для проверки авторизации ---
-// Передаем модель User в функцию middleware.
 bot.use(checkAuth(User));
 // --- Middleware для отладки
 bot.use(callbackDebug());
@@ -138,8 +137,6 @@ bot.command('addprod', checkAdmin(User), async (ctx) => {
 });
 
 bot.on('callback_query', async (ctx, next) => {
-    // 🟢 ВЫВОДИМ В ТЕРМИНАЛ НАЖАТУЮ КНОПКУ
-    console.log(`[ACTION DEBUG] Received callback_data: ${ctx.callbackQuery.data}`);
     return next();
 });
 
@@ -226,14 +223,63 @@ bot.hears('✏️ Мои черновики', async (ctx) => {
     });
 });
 
+bot.action(/cat_final_.+|select_cat_final_.+/, checkAdmin(User), async (ctx) => {    
+    await ctx.answerCbQuery('✅ Админ-тест. Код работает.'); 
+
+    const callbackData = ctx.match[0];
+    const categoryId = callbackData.split('_').pop();
+
+    if (!mongoose.Types.ObjectId.isValid(categoryId)) {
+        console.error(`[ADMIN ERROR] ID ${categoryId} не является корректным ObjectId.`);
+        return ctx.editMessageText(`⚠️ Ошибка: ID "${categoryId}" некорректен. Пожалуйста, перезапустите /addprod.`, { reply_markup: {} });
+    }
+
+    try {
+        const user = await User.findOne({ telegramId: ctx.from.id });
+        const productName = user.tempProductName;
+        if (!productName) {
+            user.currentStep = 'idle';
+            await user.save();
+            return ctx.editMessageText('⚠️ Ошибка: Название товара потеряно. Начните снова с /addprod.');
+        }
+        
+        // 1. 🚨 ПЕРВЫМ ДЕЛОМ: Находим и валидируем категорию
+        const category = await Category.findById(categoryId);
+        if (!category) {
+            user.currentStep = 'idle';
+            await user.save();
+            return ctx.editMessageText('⚠️ Ошибка: Категория не найдена. Начните снова с /addprod.', { reply_markup: {} });
+        }
+        // 2. Создаем новый товар (только если категория найдена)
+        const newProduct = await Product.create({
+            categoryId: categoryId,
+            name: productName
+        });
+        // 3. Очистка и ГАРАНТИРОВАННОЕ завершение
+        user.tempProductName = null; 
+        user.currentStep = 'idle';
+        await user.save();
+        await ctx.editMessageText(`✅ Товар *${newProduct.name}* успешно добавлен в категорию *${category.name}*!`, { parse_mode: 'Markdown' });
+        
+    } catch (error) {
+        console.error('КРИТИЧЕСКАЯ ОШИБКА в обработчике добавления товара:', error);
+            try {
+            const user = await User.findOne({ telegramId: ctx.from.id });
+            user.currentStep = 'idle';
+            await user.save();
+        } catch (e) {
+            console.error('Не удалось сбросить состояние пользователя после ошибки:', e);
+        }
+        return ctx.editMessageText('❌ Произошла ошибка при сохранении товара.');
+    }
+});
+
+
 // --- Обработка выбора категории ---
 bot.action(/cat_.+/, async (ctx) => {
   await ctx.answerCbQuery();
   const callbackData = ctx.match[0];
-  // 🛑 ГАРАНТИРОВАННАЯ ИЗОЛЯЦИЯ: Если это действие администратора, НЕМЕДЛЕННО выходим!
-  // Это единственный способ убедиться, что код пользователя не выполнится.
   if (callbackData.startsWith('select_cat_final_') || callbackData.startsWith('cat_final_')) {
-      console.log(`[ACTION DEBUG]  ИЗОЛЯЦИЯ: Это действие администратора, игнорируем.`);
       return; 
   }
   const categoryId = callbackData.split('_').pop();
@@ -281,7 +327,27 @@ bot.action(/prod_.+/, async (ctx) => {
 bot.on('text', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   const text = ctx.message.text.trim();
+    // 🟢 НОВАЯ ЛОГИКА: Если у пользователя нет телефона и он вводит текст — возможно, это номер
+  if (!user || !user.phone) {
+    // Проверяем, похож ли текст на номер (содержит цифры, +, длина > 8)
+    const cleanedText = text.replace(/[^0-9+]/g, '');
+    
+    if (cleanedText.length >= 9 && /^[\d+]/.test(text)) {
+      console.log('DEBUG: Обнаружен ввод номера без нажатия кнопки:', cleanedText);
 
+      let formattedPhone = cleanedText;
+      if (!formattedPhone.startsWith('+')) {
+        formattedPhone = '+' + formattedPhone;
+      }
+
+      user.phone = formattedPhone;
+      user.currentStep = 'idle';
+      await user.save();
+
+      await ctx.reply(`✅ Ваш номер сохранён: ${formattedPhone}`);
+      return showMainMenu(ctx);
+    }
+  }
   switch (user.currentStep) {
 
     // 🆕 АДМИН: Ожидание названия товара
@@ -290,11 +356,9 @@ bot.on('text', async (ctx) => {
       user.tempProductName = text;
       // 2. ожидание выбора категории
       user.currentStep = 'awaiting_category_selection';
-        console.log(`[ACTION DEBUG] case:awaiting_product_name: ${text}`);
       try {
       await user.save(); 
         } catch (error) {
-            console.error('КРИТИЧЕСКАЯ ОШИБКА сохранения tempProductName:', error);
             return ctx.reply('⚠️ Произошла ошибка при сохранении данных. Пожалуйста, повторите ввод названия.');
         }
       // 3. Показываем категории
@@ -315,8 +379,6 @@ bot.on('text', async (ctx) => {
     // 🆕 АДМИН: Ожидание названия категории
     case 'awaiting_category_name':
       // 1. Создаем новую категорию
-        console.log(`[ACTION DEBUG] case:awaiting_category_name: ${text}`);
-
       const newCategory = await Category.create({ name: text });
         
       // 2. Сбрасываем шаг
@@ -349,12 +411,14 @@ bot.on('text', async (ctx) => {
       return showOrderPreview(ctx, user);
 
       case 'awaiting_new_phone':
+   console.log('DEBUG: Обработка ввода номера вручную');
+  console.log('DEBUG: Введённый текст:', text);
         // Регулярное выражение для очистки строки от всего, кроме цифр
         const cleanedText = text.replace(/[^0-9]/g, ''); 
       
       // Проверка: Должно быть не менее 9 цифр (для большинства стран)
       if (cleanedText.length < 9) {
-         return ctx.reply('Пожалуйста, введите корректный номер телефона (не менее 9 цифр).');
+         return ctx.reply('❌Пожалуйста, введите корректный номер телефона (не менее 9 цифр).');
       }
 
      // Форматируем номер, добавляя '+' в начало, если его нет (для удобства поиска)
@@ -377,66 +441,6 @@ bot.on('text', async (ctx) => {
   }
 });
 
-bot.action(/cat_final_.+|select_cat_final_.+/, checkAdmin(User), async (ctx) => {
-    await ctx.answerCbQuery();
-    console.log(`Bot.action(/cat_final_.+|select_cat_final_`);
-
-    const callbackData = ctx.match[0];
-    const categoryId = callbackData.split('_').pop();
-    console.log(`callbackData.split:${categoryId}`);
-
-    if (!mongoose.Types.ObjectId.isValid(categoryId)) {
-        console.error(`[ADMIN ERROR] ID ${categoryId} не является корректным ObjectId.`);
-        return ctx.editMessageText(`⚠️ Ошибка: ID "${categoryId}" некорректен. Пожалуйста, перезапустите /addprod.`, { reply_markup: {} });
-    }
-
-    try {
-        const user = await User.findOne({ telegramId: ctx.from.id });
-        const productName = user.tempProductName;
-        console.log('[DEBUG ADMIN] Шаг 1: Имя продукта найдено? ', !!productName);
-        if (!productName) {
-            user.currentStep = 'idle';
-            await user.save();
-            console.log('[DEBUG ADMIN] Шаг 1.1: Выход по причине отсутствия имени продукта.'); // 🎯 Точка выхода
-            return ctx.editMessageText('⚠️ Ошибка: Название товара потеряно. Начните снова с /addprod.');
-        }
-        
-        // 1. 🚨 ПЕРВЫМ ДЕЛОМ: Находим и валидируем категорию
-        const category = await Category.findById(categoryId);
-        console.log('[DEBUG ADMIN] Шаг 2: Категория найдена? ', !!category);
-        if (!category) {
-            console.error(`[ADMIN ERROR] Категория с ID ${categoryId} не найдена.`);
-            user.currentStep = 'idle';
-            await user.save();
-            console.log('[DEBUG ADMIN] Шаг 2.1: Выход по причине отсутствия категории.'); // 🎯 Точка выхода  
-            return ctx.editMessageText('⚠️ Ошибка: Категория не найдена. Начните снова с /addprod.', { reply_markup: {} });
-        }
-
-        // 2. Создаем новый товар (только если категория найдена)
-        const newProduct = await Product.create({
-            categoryId: categoryId,
-            name: productName
-        });
-        
-        // 3. Очистка и ГАРАНТИРОВАННОЕ завершение
-        user.tempProductName = null; 
-        user.currentStep = 'idle';
-        await user.save();
-        console.log('[DEBUG ADMIN] Шаг 3: Сохранение данных успешно. Отправляем сообщение.');
-        await ctx.editMessageText(`✅ Товар *${newProduct.name}* успешно добавлен в категорию *${category.name}*!`, { parse_mode: 'Markdown' });
-        
-    } catch (error) {
-        console.error('КРИТИЧЕСКАЯ ОШИБКА в обработчике добавления товара:', error);
-            try {
-            const user = await User.findOne({ telegramId: ctx.from.id });
-            user.currentStep = 'idle';
-            await user.save();
-        } catch (e) {
-            console.error('Не удалось сбросить состояние пользователя после ошибки:', e);
-        }
-        return ctx.editMessageText('❌ Произошла ошибка при сохранении товара.');
-    }
-});
 
 
 // --- Удаление товара из описи ---

@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema({
   telegramId: { type: Number, required: true, unique: true },
-  phone: { type: String },
+  phone: { type: String},
   currentStep: { type: String, default: 'idle' },
   lastOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
   role: { 
