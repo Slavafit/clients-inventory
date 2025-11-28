@@ -3,9 +3,12 @@
   "version": "1.0.0",
   "description": "parcel inventory bot\r add form PC",
   "main": "index.js",
+
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start:telegram": "node index.js",
+    "start:whatsapp": "node whatsapp.js",
+    "start:dev": "concurrently \"npm run start:telegram\" \"npm run start:whatsapp\"",
+    "start": "npm run start:dev"
   },
   "repository": {
     "type": "git",
@@ -20,6 +23,7 @@
   },
   "homepage": "https://github.com/Slavafit/clients-inventory#readme",
   "devDependencies": {
+    "concurrently": "^9.2.1",
     "nodemon": "^3.1.10"
   }
 }
