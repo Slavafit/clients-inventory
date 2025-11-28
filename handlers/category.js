@@ -36,14 +36,19 @@ async function showCategorySelection(ctx) {
         return ctx.reply('В системе пока нет категорий.');
     }
     
-    // Префикс для обычного пользователя
+    // 1. Создаем кнопки категорий
     const buttons = categories.map(cat => 
         [{ text: `${cat.emoji} ${cat.name}`, callback_data: `cat_${cat._id}` }]
     );
 
+    // 2. ➕ Добавляем кнопку "Другое" / "Свой товар"
+    buttons.push(
+        [{ text: '➕ Добавить свой товар', callback_data: 'add_custom_product' }] 
+        // 🚨 Используем callback_data: 'add_custom_product'
+    );
+
     await ctx.reply('Выберите категорию:', Markup.inlineKeyboard(buttons));
 }
-
 
 module.exports = { 
     showCategorySelection,

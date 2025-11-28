@@ -16,6 +16,7 @@ const {
         showCategorySelection, 
         showAdminCategorySelection 
     } = require('./handlers/category');
+const { INSTRUCTIONS_TEXT } = require('./data/texts');
 
 // --- Подключение к MongoDB ---
 mongoose.connect(process.env.MONGO_URI)
@@ -114,6 +115,21 @@ await ctx.reply(`📦 Текущая опись:\n\n${items}\n\nИтого: ${to
 //   return ctx.reply('⛔ Недостаточно прав.');
 // });
 
+//инструкции
+bot.command('help', checkAuth(User), async (ctx) => {
+    
+    // 🛑 ИСПОЛЬЗУЕМ ИМПОРТИРОВАННУЮ КОНСТАНТУ
+    const sentMessage = await ctx.reply(INSTRUCTIONS_TEXT, {
+        parse_mode: 'Markdown'
+    });
+    
+    // Закрепление
+    try {
+        await ctx.pinChatMessage(sentMessage.message_id);
+    } catch (e) {
+        console.error(`[ERROR] Не удалось закрепить сообщение: ${e.message}`);
+    }
+});
 
 // --- Команды для администратора: Добавление категорий и товаров ---
 // 🆕 Middleware checkAdmin.
@@ -223,6 +239,19 @@ bot.hears('✏️ Мои черновики', async (ctx) => {
     });
 });
 
+// --- Обработка кнопки "Добавить свой товар" ---
+bot.action('add_custom_product', checkAuth(User), async (ctx) => {
+    await ctx.answerCbQuery();
+
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    
+    // Переводим пользователя в шаг ожидания названия
+    user.currentStep = 'awaiting_custom_product'; 
+    await user.save();
+    
+    return ctx.editMessageText('✍️ Введите название товара (например, Свеча ароматическая):');
+});
+
 bot.action(/cat_final_.+|select_cat_final_.+/, checkAdmin(User), async (ctx) => {    
     await ctx.answerCbQuery('✅ Админ-тест. Код работает.'); 
 
@@ -292,8 +321,8 @@ bot.action(/cat_.+/, async (ctx) => {
 }
 
   const category = await Category.findById(categoryId);
-  // 2. Находим товары
-  const products = await Product.find({ categoryId });
+  // 2. Находим товары и СОРТИРУЕМ по названию (name) по алфавиту
+  const products = await Product.find({ categoryId }).sort({ name: 1 }); // 1 = по возрастанию (A-Z)
   // 3. Готовим кнопки товаров
 
   const buttons = products.map(p => [{ text: p.name, callback_data: `prod_${p._id}` }]);

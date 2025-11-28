@@ -11,7 +11,7 @@ const checkAdmin = (User) => async (ctx, next) => {
     
     // Если пользовательский ID соответствует ID из .env, он всегда админ
     if (superAdminId && telegramId === superAdminId) {
-        console.log(`[AUTH] СуперАдмин ${telegramId} допущен.`);
+        //console.log(`[AUTH] СуперАдмин ${telegramId} допущен.`);
         return next();
     }
     
@@ -20,11 +20,11 @@ const checkAdmin = (User) => async (ctx, next) => {
 
     if (user && user.role === 'admin') {
         // Пользователь — администратор, разрешаем доступ
-        console.log(`[AUTH] Пользователь ${telegramId} допущен по роли "admin".`);
+        //console.log(`[AUTH] Пользователь ${telegramId} допущен по роли "admin".`);
         return next();
     } else {
         // Блокируем доступ
-        console.log(`[AUTH] Пользователь ${telegramId} заблокирован (роль: ${user ? user.role : 'нет записи'}).`);
+        //console.log(`[AUTH] Пользователь ${telegramId} заблокирован (роль: ${user ? user.role : 'нет записи'}).`);
         return ctx.reply('⛔ У вас нет прав администратора для выполнения этой команды.');
     }
 };
