@@ -332,17 +332,24 @@ async function handleWhatsAppMessage(user, whatsappId, text, payload) {
                     return sendTextMessage(whatsappId, 'Админ-режим закрыт.');
                 }
                 return sendTextMessage(whatsappId, 'Неизвестная команда. Введите *ТРЕК* или *ОТМЕНА*.');
-
+                
             case 'admin_awaiting_track':
-                const track = text.trim();
-                // Вызываем общую службу. Передаем sendTextMessage для уведомления.
-                await adminService.setTracking(user.tempAdminOrderId, track, { sendTextMessage });
+                user.tempTrackNumber = text.trim(); // Временно сохраняем номер
+                user.currentStep = 'admin_awaiting_track_link'; 
+                await user.save();
+                return sendTextMessage(whatsappId, "🔗 Теперь введите ссылку на сервис отслеживания или напишите 'НЕТ':");
+
+            case 'admin_awaiting_track_link':
+                const link = text.toLowerCase() === 'нет' ? '' : text.trim();
+                // Вызов общего сервиса для финализации
+                await adminService.setTracking(user.tempAdminOrderId, { 
+                    number: user.tempTrackNumber, 
+                    url: link 
+                }, { providers });
                 
                 user.currentStep = 'idle';
-                user.tempAdminOrderId = null;
                 await user.save();
-                
-                return sendTextMessage(whatsappId, `✅ Трек сохранен, клиент уведомлен.`);
+                return sendTextMessage(whatsappId, "✅ Данные сохранены. Клиент уведомлен.");
                 default:
                 // Неизвестный шаг, можно сбросить состояние
                 return sendTextMessage(whatsappId, 'Пожалуйста, следуйте инструкциям. Если что-то пошло не так, напишите "Начать".');

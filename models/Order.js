@@ -18,6 +18,7 @@ const orderSchema = new mongoose.Schema({
     default: 'nuevo' 
   },
   trackingNumber: { type: String, default: '' },
+  trackingUrl: { type: String, default: '' },
   updatedAt: { type: Date, default: Date.now }
 });
 

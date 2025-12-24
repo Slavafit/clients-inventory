@@ -208,13 +208,20 @@ bot.action(/admin_set_track_(.+)/, async (ctx) => {
 });
 
 // 4. Сохранение трека и уведомление клиента
-if (user.currentStep === 'admin_awaiting_track') {
-    // Вызываем ту же службу. Передаем bot для уведомления в TG.
-    await adminService.setTracking(user.tempOrderId, text.trim(), { bot });
+if (user.currentStep === 'admin_awaiting_track_link') {
+    const trackLink = text.toLowerCase() === 'нет' ? '' : text;
+    
+    // Вызываем единый сервис для уведомления и обновления БД
+    await adminService.setTracking(user.tempAdminOrderId, {
+        number: user.tempTrackNumber, // Взято из временного поля
+        url: trackLink
+    }, { bot }); // Передаем объект bot для отправки уведомления в TG
 
     user.currentStep = 'idle';
+    user.tempTrackNumber = null;
     await user.save();
-    ctx.reply('✅ Трек-номер установлен. Уведомление отправлено клиенту.');
+    
+    await ctx.reply('✅ Данные успешно сохранены. Клиент получил уведомление с треком и ссылкой.');
 }
 
 bot.on('callback_query', async (ctx, next) => {

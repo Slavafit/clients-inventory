@@ -25,11 +25,20 @@ module.exports = {
 
     async setTracking(orderId, trackNumber, providers) {
         const order = await Order.findByIdAndUpdate(
-            orderId, 
-            { trackingNumber: trackNumber, status: 'enviado', updatedAt: Date.now() }, 
+            orderId,
+            { 
+                trackingNumber: number, 
+                trackingUrl: url || '', 
+                status: 'enviado',
+                updatedAt: Date.now()
+            }, 
             { new: true }
         );
-        const msg = `📦 *Ваш заказ отправлен!*\nТрек-номер: *${trackNumber}*`;
+        let msg = `📦 *Ваша посылка отправлена!*\n\n`;
+        msg += `🔢 Трек-номер: *${number}*\n`;
+        if (url) {
+            msg += `🌐 Отследить можно здесь: ${url}`;
+        }
         await notifyClient(order.userId, msg, providers);
         return order;
     },
