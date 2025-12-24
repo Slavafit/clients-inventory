@@ -7,6 +7,7 @@ const bodyParser = require('body-parser');
 const User = require('./models/User');
 const Product = require('./models/Product');
 const { showCategorySelection, showProductSelection } = require('./handlers/whatsappUI');
+const adminService = require('./services/adminService');
 const { sendTextMessage } = require('./whatsappClient');
 
 const app = express();
@@ -78,6 +79,7 @@ app.post('/webhook', async (req, res) => {
  */
 async function handleWhatsAppMessage(user, whatsappId, text, payload) {
     const currentStep = user.currentStep;
+    const command = text ? text.toLowerCase().trim() : ''; // 🟢 Определение переменной command
 
     // --- ОБРАБОТКА НАЖАТИЯ КНОПОК/СПИСКОВ (Payload) ---
     if (payload) {
@@ -121,6 +123,34 @@ async function handleWhatsAppMessage(user, whatsappId, text, payload) {
     else if (text) {
         switch (currentStep) {
             case 'idle':
+                    const isAdmin = user.role === 'admin';
+
+                // Поиск клиента по номеру (только для админов)
+                if (isAdmin && command.startsWith('поиск ')) {
+                    const searchPhone = text.replace('поиск ', '').trim();
+                    const Order = require('./models/Order'); // Убедитесь, что модель импортирована
+                    
+                    const lastOrder = await Order.findOne({ clientPhone: searchPhone }).sort({ createdAt: -1 });
+                    
+                    if (!lastOrder) {
+                        return sendTextMessage(whatsappId, `❌ Заказ для номера ${searchPhone} не найден.`);
+                    }
+
+                    user.tempAdminOrderId = lastOrder._id;
+                    user.currentStep = 'admin_order_manage';
+                    await user.save();
+
+                    return sendTextMessage(whatsappId, 
+                        `📄 *Заказ найден:*\n` +
+                        `ID: ${lastOrder._id}\n` +
+                        `Сумма: ${lastOrder.totalSum}€\n` +
+                        `Статус: ${lastOrder.status}\n` +
+                        `Трек: ${lastOrder.trackingNumber || 'не установлен'}\n\n` +
+                        `*Команды:*\n` +
+                        `1. Напишите *ТРЕК*, чтобы установить номер отслеживания.\n` +
+                        `2. Напишите *ОТМЕНА*, чтобы выйти.`
+                    );
+                }
                 // Общая обработка текста в режиме ожидания (аналог bot.hears)
                 if (text.toLowerCase() === 'начать') {
                     // 🚨 Заменяем startNewOrder Telegraf на showCategorySelection WhatsApp
@@ -169,18 +199,7 @@ async function handleWhatsAppMessage(user, whatsappId, text, payload) {
                 }
                 return sendTextMessage(whatsappId, '👋 Привет! Напишите "Начать", чтобы создать опись, или "Помощь" для инструкции.');
             
-            case 'awaiting_quantity':
-                // ... (Логика обработки количества, как в Telegraf)
-                const quantity = parseInt(text.trim());
-                if (isNaN(quantity) || quantity <= 0) {
-                    return sendTextMessage(whatsappId, '⚠️ Некорректное количество. Введите только положительное число.');
-                }
-                // Находим tempProductId, добавляем в currentOrder, переводим в awaiting_total
-                // ... (тут нужно добавить логику из index.js)
-                user.currentStep = 'awaiting_total';
-                await user.save();
-                return sendTextMessage(whatsappId, 'Теперь введите ТОЛЬКО ЧИСЛО, обозначающее общую сумму (например, 1500):');
-                
+               
             case 'awaiting_total':
                 // 1. Обработка суммы
                 const total = parseFloat(command.replace(',', '.'));
@@ -201,7 +220,7 @@ async function handleWhatsAppMessage(user, whatsappId, text, payload) {
                     `✅ Товар добавлен! Текущая сумма описи: *${currentTotal.toFixed(2)}€*.\n\n` + 
                     'Что дальше? Напишите *ДОБАВИТЬ* чтобы продолжить, или *ЗАВЕРШИТЬ* чтобы сохранить черновик и отправить.'
                 );
-            // 🚨 НОВЫЙ CASE: Обработка команд после добавления позиции (Замена Inline-кнопок)
+                // 🚨 НОВЫЙ CASE: Обработка команд после добавления позиции (Замена Inline-кнопок)
             case 'confirm_order':
                 if (command === 'добавить') {
                     // 1. Логика "Добавить ещё товар" (аналог bot.action('add_more'))
@@ -263,7 +282,7 @@ async function handleWhatsAppMessage(user, whatsappId, text, payload) {
                     return sendTextMessage(whatsappId, '🤔 Введите *ДОБАВИТЬ* или *ЗАВЕРШИТЬ*.');
                 }
             
-            // 🚨 НОВЫЙ CASE: Ожидание команды на окончательную отправку
+                // 🚨 НОВЫЙ CASE: Ожидание команды на окончательную отправку
             case 'awaiting_final_send':
                 if (command === 'отправить') {
                     // 3. Логика "Окончательно отправить" (аналог bot.action('final_send_'))
@@ -301,13 +320,56 @@ async function handleWhatsAppMessage(user, whatsappId, text, payload) {
                     return sendTextMessage(whatsappId, '🤔 Введите *ОТПРАВИТЬ* или *РЕДАКТИРОВАТЬ*.');
                 }
 
-            default:
+            case 'admin_order_manage':
+                if (command === 'трек') {
+                    user.currentStep = 'admin_awaiting_track';
+                    await user.save();
+                    return sendTextMessage(whatsappId, '🔢 Введите трек-номер для этого заказа:');
+                } else if (command === 'отмена') {
+                    user.currentStep = 'idle';
+                    user.tempAdminOrderId = null;
+                    await user.save();
+                    return sendTextMessage(whatsappId, 'Админ-режим закрыт.');
+                }
+                return sendTextMessage(whatsappId, 'Неизвестная команда. Введите *ТРЕК* или *ОТМЕНА*.');
+
+            case 'admin_awaiting_track':
+                const track = text.trim();
+                // Вызываем общую службу. Передаем sendTextMessage для уведомления.
+                await adminService.setTracking(user.tempAdminOrderId, track, { sendTextMessage });
+                
+                user.currentStep = 'idle';
+                user.tempAdminOrderId = null;
+                await user.save();
+                
+                return sendTextMessage(whatsappId, `✅ Трек сохранен, клиент уведомлен.`);
+                default:
                 // Неизвестный шаг, можно сбросить состояние
                 return sendTextMessage(whatsappId, 'Пожалуйста, следуйте инструкциям. Если что-то пошло не так, напишите "Начать".');
         }
     }
 }
 
+async function notifyClientStatusUpdate(order) {
+    const User = require('./models/User');
+    const client = await User.findById(order.userId);
+    
+    if (!client) return;
+
+    const message = `📦 *Ваш заказ обновлен!*\n\n` +
+                    `Новый статус: *${order.status === 'enviado' ? 'Отправлено' : order.status}*\n` +
+                    (order.trackingNumber ? `Трек-номер: *${order.trackingNumber}*` : '');
+
+    // Если у клиента есть whatsappId, отправляем в WhatsApp
+    if (client.whatsappId) {
+        await sendTextMessage(client.whatsappId, message);
+    } 
+    // Если клиент из Telegram, отправляем через бота Telegram
+    else if (client.telegramId) {
+        // Здесь потребуется доступ к объекту bot из index.js или отдельный экспорт
+        // bot.telegram.sendMessage(client.telegramId, message, { parse_mode: 'Markdown' });
+    }
+}
 
 app.listen(PORT, () => {
     console.log(`🚀 WhatsApp Webhook Server запущен на порту ${PORT}`);

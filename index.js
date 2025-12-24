@@ -8,10 +8,12 @@ const Category = require('./models/Category');
 const Product = require('./models/Product');
 const User = require('./models/User');
 const Order = require('./models/Order');
+const adminService = require('./services/adminService');
 const { checkAuth } = require('./middlewares/checkAuth');
 const { checkAdmin } = require('./middlewares/checkAdmin');
 const { registerAuthHandlers } = require('./handlers/auth');
 const { callbackDebug } = require('./middlewares/callbackDebug');
+const { sendStatusUpdate } = require('./handlers/report');
 const { 
         showCategorySelection, 
         showAdminCategorySelection 
@@ -115,6 +117,16 @@ await ctx.reply(`📦 Текущая опись:\n\n${items}\n\nИтого: ${to
 //   return ctx.reply('⛔ Недостаточно прав.');
 // });
 
+bot.command('makeadmin', async (ctx) => {
+    if (ctx.from.id !== Number(process.env.ADMIN_ID)) return;
+
+    const targetId = ctx.message.text.split(' ')[1];
+    if (!targetId) return ctx.reply('Введите ID: /makeadmin 123456');
+
+    await User.findOneAndUpdate({ telegramId: targetId }, { role: 'admin' });
+    ctx.reply(`✅ Пользователь ${targetId} теперь админ.`);
+});
+
 //инструкции
 bot.command('help', checkAuth(User), async (ctx) => {
     
@@ -151,6 +163,59 @@ bot.command('addprod', checkAdmin(User), async (ctx) => {
   await user.save();
   return ctx.reply('📝 Введите **название** нового товара:', { parse_mode: 'Markdown' });
 });
+
+// 1. Вход в режим поиска
+bot.command('admin', async (ctx) => {
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    if (user?.role !== 'admin' && ctx.from.id !== Number(process.env.ADMIN_ID)) return;
+
+    user.currentStep = 'admin_search_client';
+    await user.save();
+    ctx.reply('🔍 Введите номер телефона клиента (с +) для поиска заказа:');
+});
+
+// 2. Обработка поиска и вывод заказа
+// (Добавьте это в ваш общий обработчик bot.on('text'))
+if (user.currentStep === 'admin_search_client') {
+    const order = await Order.findOne({ clientPhone: text.trim() }).sort({ createdAt: -1 });
+    if (!order) return ctx.reply('❌ Заказ не найден.');
+
+    user.tempOrderId = order._id; // Сохраняем ID заказа для админа
+    user.currentStep = 'idle';
+    await user.save();
+
+    ctx.reply(
+        `📄 Заказ от: ${order.createdAt.toLocaleDateString()}\n` +
+        `Статус: ${order.status}\n` +
+        `Сумма: ${order.totalSum}€\n` +
+        `Трек: ${order.trackingNumber || 'нет'}\n\n` +
+        `Выберите действие:`,
+        Markup.inlineKeyboard([
+            [Markup.button.callback('📦 Установить трек', `admin_set_track_${order._id}`)],
+            [Markup.button.callback('✅ Завершить (Entregado)', `admin_status_delivered_${order._id}`)]
+        ])
+    );
+}
+
+// 3. Обработка кнопки "Установить трек"
+bot.action(/admin_set_track_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    user.currentStep = 'admin_awaiting_track';
+    user.tempOrderId = orderId;
+    await user.save();
+    ctx.reply('Введите трек-номер для этого заказа:');
+});
+
+// 4. Сохранение трека и уведомление клиента
+if (user.currentStep === 'admin_awaiting_track') {
+    // Вызываем ту же службу. Передаем bot для уведомления в TG.
+    await adminService.setTracking(user.tempOrderId, text.trim(), { bot });
+
+    user.currentStep = 'idle';
+    await user.save();
+    ctx.reply('✅ Трек-номер установлен. Уведомление отправлено клиенту.');
+}
 
 bot.on('callback_query', async (ctx, next) => {
     return next();

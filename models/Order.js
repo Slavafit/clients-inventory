@@ -16,7 +16,9 @@ const orderSchema = new mongoose.Schema({
     type: String, 
     enum: ['nuevo', 'en tramito', 'enviado', 'entregado', 'cancelado'], 
     default: 'nuevo' 
-  } // 🚚 Статус отправления
+  },
+  trackingNumber: { type: String, default: '' },
+  updatedAt: { type: Date, default: Date.now }
 });
 
 module.exports = mongoose.model('Order', orderSchema);
