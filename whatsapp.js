@@ -339,17 +339,37 @@ async function handleWhatsAppMessage(user, whatsappId, text, payload) {
                 await user.save();
                 return sendTextMessage(whatsappId, "🔗 Теперь введите ссылку на сервис отслеживания или напишите 'НЕТ':");
 
+
             case 'admin_awaiting_track_link':
-                const link = text.toLowerCase() === 'нет' ? '' : text.trim();
-                // Вызов общего сервиса для финализации
-                await adminService.setTracking(user.tempAdminOrderId, { 
-                    number: user.tempTrackNumber, 
-                    url: link 
-                }, { providers });
-                
-                user.currentStep = 'idle';
-                await user.save();
-                return sendTextMessage(whatsappId, "✅ Данные сохранены. Клиент уведомлен.");
+                const linkInput = text.trim();
+                const trackLink = linkInput.toLowerCase() === 'нет' ? '' : linkInput;
+
+                // Проверка на http (опционально)
+                if (trackLink && !trackLink.startsWith('http')) {
+                    return sendTextMessage(whatsappId, '⚠️ Ссылка должна начинаться с http или https. Попробуйте снова или напишите "нет".');
+                }
+
+                try {
+                    // Вызываем общий сервис
+                    await adminService.setTracking(
+                        user.tempAdminOrderId, 
+                        { number: user.tempTrackNumber, url: trackLink }, 
+                        { sendTextMessage } // Передаем функцию отправки для WA
+                    );
+
+                    // Сбрасываем состояние
+                    user.currentStep = 'idle';
+                    user.tempTrackNumber = null;
+                    user.tempAdminOrderId = null;
+                    await user.save();
+
+                    return sendTextMessage(whatsappId, '✅ Данные сохранены. Клиент получил уведомление.');
+                } catch (err) {
+                    console.error(err);
+                    user.currentStep = 'idle';
+                    await user.save();
+                    return sendTextMessage(whatsappId, '❌ Ошибка при сохранении. Попробуйте снова через поиск.');
+                }
                 default:
                 // Неизвестный шаг, можно сбросить состояние
                 return sendTextMessage(whatsappId, 'Пожалуйста, следуйте инструкциям. Если что-то пошло не так, напишите "Начать".');

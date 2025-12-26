@@ -13,7 +13,6 @@ const { checkAuth } = require('./middlewares/checkAuth');
 const { checkAdmin } = require('./middlewares/checkAdmin');
 const { registerAuthHandlers } = require('./handlers/auth');
 const { callbackDebug } = require('./middlewares/callbackDebug');
-const { sendStatusUpdate } = require('./handlers/report');
 const { 
         showCategorySelection, 
         showAdminCategorySelection 
@@ -174,30 +173,8 @@ bot.command('admin', async (ctx) => {
     ctx.reply('🔍 Введите номер телефона клиента (с +) для поиска заказа:');
 });
 
-// 2. Обработка поиска и вывод заказа
-// (Добавьте это в ваш общий обработчик bot.on('text'))
-if (user.currentStep === 'admin_search_client') {
-    const order = await Order.findOne({ clientPhone: text.trim() }).sort({ createdAt: -1 });
-    if (!order) return ctx.reply('❌ Заказ не найден.');
 
-    user.tempOrderId = order._id; // Сохраняем ID заказа для админа
-    user.currentStep = 'idle';
-    await user.save();
-
-    ctx.reply(
-        `📄 Заказ от: ${order.createdAt.toLocaleDateString()}\n` +
-        `Статус: ${order.status}\n` +
-        `Сумма: ${order.totalSum}€\n` +
-        `Трек: ${order.trackingNumber || 'нет'}\n\n` +
-        `Выберите действие:`,
-        Markup.inlineKeyboard([
-            [Markup.button.callback('📦 Установить трек', `admin_set_track_${order._id}`)],
-            [Markup.button.callback('✅ Завершить (Entregado)', `admin_status_delivered_${order._id}`)]
-        ])
-    );
-}
-
-// 3. Обработка кнопки "Установить трек"
+// Обработка кнопки "Установить трек"
 bot.action(/admin_set_track_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
     const user = await User.findOne({ telegramId: ctx.from.id });
@@ -207,22 +184,7 @@ bot.action(/admin_set_track_(.+)/, async (ctx) => {
     ctx.reply('Введите трек-номер для этого заказа:');
 });
 
-// 4. Сохранение трека и уведомление клиента
-if (user.currentStep === 'admin_awaiting_track_link') {
-    const trackLink = text.toLowerCase() === 'нет' ? '' : text;
-    
-    // Вызываем единый сервис для уведомления и обновления БД
-    await adminService.setTracking(user.tempAdminOrderId, {
-        number: user.tempTrackNumber, // Взято из временного поля
-        url: trackLink
-    }, { bot }); // Передаем объект bot для отправки уведомления в TG
 
-    user.currentStep = 'idle';
-    user.tempTrackNumber = null;
-    await user.save();
-    
-    await ctx.reply('✅ Данные успешно сохранены. Клиент получил уведомление с треком и ссылкой.');
-}
 
 bot.on('callback_query', async (ctx, next) => {
     return next();
@@ -428,7 +390,8 @@ bot.action(/prod_.+/, async (ctx) => {
 bot.on('text', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   const text = ctx.message.text.trim();
-    // 🟢 НОВАЯ ЛОГИКА: Если у пользователя нет телефона и он вводит текст — возможно, это номер
+
+    //Если у пользователя нет телефона и он вводит текст — возможно, это номер
   if (!user || !user.phone) {
     // Проверяем, похож ли текст на номер (содержит цифры, +, длина > 8)
     const cleanedText = text.replace(/[^0-9+]/g, '');
@@ -450,8 +413,64 @@ bot.on('text', async (ctx) => {
     }
   }
   switch (user.currentStep) {
+    //  Обработка поиска и вывод заказа
+    case 'admin_search_client':
+            const order = await Order.findOne({ clientPhone: text.trim() }).sort({ createdAt: -1 });
+      if (!order) return ctx.reply('❌ Заказ не найден.');
 
-    // 🆕 АДМИН: Ожидание названия товара
+      user.tempOrderId = order._id; // Сохраняем ID заказа для админа
+      user.currentStep = 'idle';
+      await user.save();
+
+      ctx.reply(
+          `📄 Заказ от: ${order.createdAt.toLocaleDateString()}\n` +
+          `Статус: ${order.status}\n` +
+          `Сумма: ${order.totalSum}€\n` +
+          `Трек: ${order.trackingNumber || 'нет'}\n\n` +
+          `Выберите действие:`,
+          Markup.inlineKeyboard([
+              [Markup.button.callback('📦 Установить трек', `admin_set_track_${order._id}`)],
+              [Markup.button.callback('✅ Завершить (Entregado)', `admin_status_delivered_${order._id}`)]
+          ])
+      );
+      // Шаг: Админ ввел трек-номер
+    case 'admin_awaiting_track':
+        user.tempTrackNumber = text.trim(); // Сохраняем номер в базу
+        user.currentStep = 'admin_awaiting_track_link'; // Переходим к следующему шагу
+        await user.save();
+        
+        return ctx.reply('🔗 Шаг 2: Теперь введите ссылку на сервис отслеживания (или напишите "нет", если ссылки нет):');
+      // Шаг: Админ ввел ссылку
+    case 'admin_awaiting_track_link':
+          const link = text.toLowerCase().trim() === 'нет' ? '' : text.trim();
+          // Простая валидация ссылки (опционально)
+        if (link && !link.startsWith('http')) {
+            return ctx.reply('⚠️ Ссылка должна начинаться с http или https. Попробуйте снова или напишите "нет".');
+        }
+
+        // Вызываем общий сервис (adminService.js)
+        // Он сам обновит статус, сохранит данные и уведомит клиента (TG или WA)
+        try {
+            await adminService.setTracking(
+                user.tempAdminOrderId, 
+                { number: user.tempTrackNumber, url: link }, 
+                { bot } // Передаем bot для отправки уведомлений в TG
+            );
+
+            // Сброс состояния админа
+            user.currentStep = 'idle';
+            user.tempTrackNumber = null;
+            user.tempAdminOrderId = null;
+            await user.save();
+
+            return ctx.reply('✅ Трек-номер и ссылка сохранены. Клиент уведомлен.');
+        } catch (err) {
+            console.error(err);
+            user.currentStep = 'idle'; // Сбрасываем при ошибке, чтобы не застрять
+            await user.save();
+            return ctx.reply('❌ Произошла ошибка при сохранении трека.');
+        }
+        // 🆕 АДМИН: Ожидание названия товара
     case 'awaiting_product_name':
       // 1. Сохраняем введенное название во временное поле
       user.tempProductName = text;
@@ -465,7 +484,6 @@ bot.on('text', async (ctx) => {
       // 3. Показываем категории
       return showAdminCategorySelection(ctx);
 
-      
     case 'awaiting_category_selection':
      // Если пользователь ввел текст, когда ждал нажатия кнопки,
      // мы возвращаем его в главное меню или сообщаем об ошибке.
@@ -477,7 +495,7 @@ bot.on('text', async (ctx) => {
      // Общая обработка текста, если нет активных процессов.
      return showMainMenu(ctx);
 
-    // 🆕 АДМИН: Ожидание названия категории
+    // АДМИН: Ожидание названия категории
     case 'awaiting_category_name':
       // 1. Создаем новую категорию
       const newCategory = await Category.create({ name: text });
@@ -487,7 +505,7 @@ bot.on('text', async (ctx) => {
       await user.save();
       
       return ctx.reply(`✅ Категория "${newCategory.name}" успешно добавлена!`);
-
+    // АДМИН: Ожидание названия товара
     case 'awaiting_custom_product':
       user.currentOrder.push({ product: text, quantity: 0, total: 0 });
       user.currentStep = 'awaiting_quantity';
@@ -498,7 +516,7 @@ bot.on('text', async (ctx) => {
       const qty = parseInt(text);
       if (!qty || qty <= 0) return ctx.reply('Введите корректное количество.');
       user.currentOrder[user.currentOrder.length - 1].quantity = qty;
-      user.currentStep = 'awaiting_total'; // <-- ИЗМЕНЕНО: awaiting_price -> awaiting_total
+      user.currentStep = 'awaiting_total'; // awaiting_total
       await user.save();
       return ctx.reply('💰 Введите *общую сумму* за эту позицию (например, 19.99):', { parse_mode: 'Markdown' }); // <-- ИЗМЕНЕНО: Текст запроса
 
@@ -512,8 +530,8 @@ bot.on('text', async (ctx) => {
       return showOrderPreview(ctx, user);
 
       case 'awaiting_new_phone':
-   console.log('DEBUG: Обработка ввода номера вручную');
-  console.log('DEBUG: Введённый текст:', text);
+      //console.log('DEBUG: Обработка ввода номера вручную');
+      //console.log('DEBUG: Введённый текст:', text);
         // Регулярное выражение для очистки строки от всего, кроме цифр
         const cleanedText = text.replace(/[^0-9]/g, ''); 
       
@@ -699,8 +717,8 @@ bot.action(/final_send_.+/, async (ctx) => {
         }
     }
 
-    // 2. Меняем статус на "отправлен"
-    order.status = 'enviado'; 
+    // 2. Меняем статус на "в работе"
+    order.status = 'en tramito';
     await order.save();
     
     // Обновляем сообщение в чате
