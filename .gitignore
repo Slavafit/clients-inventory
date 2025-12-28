@@ -1,3 +1,4 @@
 .env
 service-account.json
 botdata.sqlite
+node_modules

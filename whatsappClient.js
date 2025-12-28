@@ -1,4 +1,5 @@
 // whatsappClient.js
+require('dotenv').config();
 const axios = require('axios');
 
 const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;

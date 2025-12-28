@@ -33,7 +33,6 @@ if (process.env.USE_GOOGLE_SHEETS === 'true' && fs.existsSync(process.env.GOOGLE
   sheetsClient = google.sheets({ version: 'v4', auth });
   console.log('✅ Google Sheets connected');
 
-  // Проверим наличие заголовков и создадим, если их нет
   (async () => {
     try {
       const sheetId = process.env.GOOGLE_SHEET_ID;
@@ -63,12 +62,11 @@ if (process.env.USE_GOOGLE_SHEETS === 'true' && fs.existsSync(process.env.GOOGLE
 // --- Инициализация бота ---
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// 🟢 РЕГИСТРАЦИЯ ВСЕЙ ЛОГИКИ АВТОРИЗАЦИИ
+// 🟢 РЕГИСТРАЦИЯ ЛОГИКИ АВТОРИЗАЦИИ
 registerAuthHandlers(bot, User, showMainMenu);
 
-// --- Middleware для проверки авторизации ---
+// --- Middleware ---
 bot.use(checkAuth(User));
-// --- Middleware для отладки
 bot.use(callbackDebug());
 
 // --- Главное меню ---
@@ -79,51 +77,32 @@ async function showMainMenu(ctx) {
   ]).resize());
 }
 
-// --- Функция предпросмотра и редактирования описи ---
+// --- Функция предпросмотра ---
 async function showOrderPreview(ctx, user) {
   const items = user.currentOrder.map((i, idx) => {
-      // 1. Проверяем, существует ли i.total. Если нет, используем 0.
       const itemTotal = i.total && !isNaN(i.total) ? i.total : 0; 
-      
-      // 2. Отображаем элемент
       return `${idx + 1}. ${i.product} — ${i.quantity}шт, всего *${itemTotal.toFixed(2)}€*`;
   }).join('\n');
-  // Общая сумма по описи - просто суммируем total из каждой позиции
+  
   const total = user.currentOrder.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
 
-const buttons = user.currentOrder.map((i, idx) => [
-  { text: `🗑 Удалить ${i.product}`, callback_data: `del_${idx}` }
-]);
-buttons.push([
-  { text: '➕ Добавить товар', callback_data: 'add_more' },
-  { text: '✅ Отправить опись', callback_data: 'send_order' }
-]);
-buttons.push([{ text: '❌ Отменить', callback_data: 'cancel_order' }]);
+  const buttons = user.currentOrder.map((i, idx) => [
+    { text: `🗑 Удалить ${i.product}`, callback_data: `del_${idx}` }
+  ]);
+  buttons.push([
+    { text: '➕ Добавить товар', callback_data: 'add_more' },
+    { text: '✅ Отправить опись', callback_data: 'send_order' }
+  ]);
+  buttons.push([{ text: '❌ Отменить', callback_data: 'cancel_order' }]);
 
-await ctx.reply(`📦 Текущая опись:\n\n${items}\n\nИтого: ${total.toFixed(2)}€`, {
-  reply_markup: { inline_keyboard: buttons }
-});
+  await ctx.reply(`📦 Текущая опись:\n\n${items}\n\nИтого: ${total.toFixed(2)}€`, {
+    reply_markup: { inline_keyboard: buttons }
+  });
 }
 
-// --- Обработчик для установки роли администратора (ТОЛЬКО ДЛЯ ПЕРВОНАЧАЛЬНОЙ НАСТРОЙКИ!) ---
-//Установите свой Telegram ID в BOT_ADMIN_ID в .env файле
-// bot.command('setadmin', async (ctx) => {
-//   if (ctx.from.id.toString() === process.env.BOT_ADMIN_ID) {
-//       await User.findOneAndUpdate({ telegramId: ctx.from.id }, { role: 'admin' }, { upsert: true });
-//       return ctx.reply('🎉 Вы назначены администратором!');
-//   }
-//   return ctx.reply('⛔ Недостаточно прав.');
-// });
-
-//инструкции
+// --- Инструкции ---
 bot.command('help', checkAuth(User), async (ctx) => {
-    
-    // 🛑 ИСПОЛЬЗУЕМ ИМПОРТИРОВАННУЮ КОНСТАНТУ
-    const sentMessage = await ctx.reply(INSTRUCTIONS_TEXT, {
-        parse_mode: 'Markdown'
-    });
-    
-    // Закрепление
+    const sentMessage = await ctx.reply(INSTRUCTIONS_TEXT, { parse_mode: 'Markdown' });
     try {
         await ctx.pinChatMessage(sentMessage.message_id);
     } catch (e) {
@@ -131,29 +110,21 @@ bot.command('help', checkAuth(User), async (ctx) => {
     }
 });
 
-// --- Команды для администратора: Добавление категорий и товаров ---
-// 🆕 Middleware checkAdmin.
+// --- Админские команды ---
 bot.command('addcat', checkAdmin(User), async (ctx) => {
-  // Устанавливаем шаг для ожидания названия категории
   const user = await User.findOne({ telegramId: ctx.from.id });
   user.currentStep = 'awaiting_category_name';
   await user.save();
   return ctx.reply('📝 Введите название новой категории:');
 });
 
-// 🆕 Middleware checkAdmin используется здесь
 bot.command('addprod', checkAdmin(User), async (ctx) => {
-  // Запускаем процесс добавления товара
   const user = await User.findOne({ telegramId: ctx.from.id });
   user.currentStep = 'awaiting_product_name';
-  user.tempProductName = null; // Очищаем tempProductName
-  user.tempCategoryId = null; // Очищаем tempCategoryId
+  user.tempProductName = null;
+  user.tempCategoryId = null;
   await user.save();
   return ctx.reply('📝 Введите **название** нового товара:', { parse_mode: 'Markdown' });
-});
-
-bot.on('callback_query', async (ctx, next) => {
-    return next();
 });
 
 // --- Обработчик кнопки "Создать опись" ---
@@ -161,30 +132,32 @@ bot.hears('📦 Создать опись', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   user.currentOrder = [];
   user.currentStep = 'idle';
+  user.lastOrderId = null; // 🔥 ИСПРАВЛЕНИЕ: Сбрасываем ID старого черновика, чтобы не перезаписать его
   await user.save();
   await showCategorySelection(ctx);
 });
 
-// --- Просмотр отправлений пользователя ---
+// --- 🔥 ИСПРАВЛЕНИЕ: Добавлен отсутствующий обработчик смены номера ---
+bot.hears('🔄 Изменить номер', async (ctx) => {
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    user.currentStep = 'awaiting_new_phone';
+    await user.save();
+    return ctx.reply('📱 Введите ваш новый номер телефона (например: +34123456789):');
+});
+
+// --- Просмотр отправлений ---
 bot.hears('🧾 Мои отправления', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
-  
-  // 1. Получаем текущий привязанный номер телефона
   let currentPhone = user.phone; 
-  // Стандартизация номера для поиска (для избежания "+7" vs "7")
   if (currentPhone && !currentPhone.startsWith('+')) {
       currentPhone = '+' + currentPhone; 
   }
   
-  // ❌ Если телефона нет (теоретически невозможно из-за middleware), выходим
-  if (!currentPhone) {
-      return ctx.reply('⚠️ Пожалуйста, сначала привяжите номер телефона.');
-  }
+  if (!currentPhone) return ctx.reply('⚠️ Пожалуйста, сначала привяжите номер телефона.');
 
-  // 3. Ищем заказы НАПРЯМУЮ по полю clientPhone в модели Order
   const orders = await Order.find({ 
       clientPhone: currentPhone, 
-      status: { $ne: 'nuevo' } // 👈 ИСКЛЮЧАЕМ ЧЕРНОВИКИ
+      status: { $ne: 'nuevo' }
   }).sort({ timestamp: -1 });
   
   if (!orders.length) return ctx.reply(`📭 У вас пока нет отправлений, связанных с номером ${currentPhone}.`);
@@ -193,148 +166,117 @@ bot.hears('🧾 Мои отправления', async (ctx) => {
   orders.forEach((o, i) => {
      text += `#${i + 1} от ${o.timestamp.toLocaleString()} — ${o.totalSum.toFixed(2)}€\n`;
   });
-    await ctx.reply(text);
+  await ctx.reply(text);
 });
 
-
-// --- Просмотр активных черновиков ---
+// --- Просмотр черновиков ---
 bot.hears('✏️ Мои черновики', async (ctx) => {
     const user = await User.findOne({ telegramId: ctx.from.id });
     let currentPhone = user.phone;
     
-    // Стандартизация номера
-    if (!currentPhone) {
-        return ctx.reply('⚠️ Сначала привяжите номер телефона.');
-    }
-    if (!currentPhone.startsWith('+')) {
-        currentPhone = '+' + currentPhone; 
-    }
+    if (!currentPhone) return ctx.reply('⚠️ Сначала привяжите номер телефона.');
+    if (!currentPhone.startsWith('+')) currentPhone = '+' + currentPhone; 
 
-    // 1. Ищем все заказы со статусом 'новое' по номеру телефона
     const drafts = await Order.find({ 
         clientPhone: currentPhone, 
-        status: 'nuevo' // Только черновики
+        status: 'nuevo'
     }).sort({ timestamp: -1 });
 
-    if (!drafts.length) {
-        return ctx.reply('🙌 У вас нет активных черновиков.');
-    }
+    if (!drafts.length) return ctx.reply('🙌 У вас нет активных черновиков.');
 
     let text = '✏️ Ваши активные черновики (нажмите, чтобы редактировать):\n\n';
     
-    // 2. Создаем кнопки для каждого черновика
     const draftButtons = drafts.map((d, i) => {
         return [{ 
-            // Кнопка: "Черновик #1 от [дата] (Сумма)"
             text: `Черновик #${i + 1} от ${d.timestamp.toLocaleDateString()} (${d.totalSum.toFixed(2)}€)`, 
-            // Используем уже существующий обработчик edit_order_...
             callback_data: `edit_order_${d._id}` 
         }];
     });
 
-    await ctx.reply(text, {
-        reply_markup: {
-            inline_keyboard: draftButtons
-        }
-    });
+    await ctx.reply(text, { reply_markup: { inline_keyboard: draftButtons } });
 });
 
-// --- Обработка кнопки "Добавить свой товар" ---
+// --- Обработка добавления Custom Product ---
 bot.action('add_custom_product', checkAuth(User), async (ctx) => {
     await ctx.answerCbQuery();
-
     const user = await User.findOne({ telegramId: ctx.from.id });
-    
-    // Переводим пользователя в шаг ожидания названия
     user.currentStep = 'awaiting_custom_product'; 
     await user.save();
-    
     return ctx.editMessageText('✍️ Введите название товара (например, Свеча ароматическая):');
 });
 
+// --- Админ: Финальное добавление товара ---
 bot.action(/cat_final_.+|select_cat_final_.+/, checkAdmin(User), async (ctx) => {    
-    await ctx.answerCbQuery('✅ Админ-тест. Код работает.'); 
+    await ctx.answerCbQuery(); 
 
     const callbackData = ctx.match[0];
     const categoryId = callbackData.split('_').pop();
 
     if (!mongoose.Types.ObjectId.isValid(categoryId)) {
-        console.error(`[ADMIN ERROR] ID ${categoryId} не является корректным ObjectId.`);
-        return ctx.editMessageText(`⚠️ Ошибка: ID "${categoryId}" некорректен. Пожалуйста, перезапустите /addprod.`, { reply_markup: {} });
+        return ctx.editMessageText(`⚠️ Ошибка ID.`);
     }
 
     try {
         const user = await User.findOne({ telegramId: ctx.from.id });
         const productName = user.tempProductName;
+        
         if (!productName) {
             user.currentStep = 'idle';
             await user.save();
-            return ctx.editMessageText('⚠️ Ошибка: Название товара потеряно. Начните снова с /addprod.');
+            return ctx.editMessageText('⚠️ Ошибка: Название товара потеряно.');
         }
         
-        // 1. 🚨 ПЕРВЫМ ДЕЛОМ: Находим и валидируем категорию
         const category = await Category.findById(categoryId);
         if (!category) {
             user.currentStep = 'idle';
             await user.save();
-            return ctx.editMessageText('⚠️ Ошибка: Категория не найдена. Начните снова с /addprod.', { reply_markup: {} });
+            return ctx.editMessageText('⚠️ Ошибка: Категория не найдена.');
         }
-        // 2. Создаем новый товар (только если категория найдена)
+
         const newProduct = await Product.create({
             categoryId: categoryId,
             name: productName
         });
-        // 3. Очистка и ГАРАНТИРОВАННОЕ завершение
+
         user.tempProductName = null; 
         user.currentStep = 'idle';
         await user.save();
         await ctx.editMessageText(`✅ Товар *${newProduct.name}* успешно добавлен в категорию *${category.name}*!`, { parse_mode: 'Markdown' });
         
     } catch (error) {
-        console.error('КРИТИЧЕСКАЯ ОШИБКА в обработчике добавления товара:', error);
-            try {
-            const user = await User.findOne({ telegramId: ctx.from.id });
-            user.currentStep = 'idle';
-            await user.save();
-        } catch (e) {
-            console.error('Не удалось сбросить состояние пользователя после ошибки:', e);
-        }
-        return ctx.editMessageText('❌ Произошла ошибка при сохранении товара.');
+        console.error('CRITICAL ERROR in add product:', error);
+        return ctx.editMessageText('❌ Ошибка при сохранении товара.');
     }
 });
 
-
-// --- Обработка выбора категории ---
+// --- Выбор категории ---
 bot.action(/cat_.+/, async (ctx) => {
   await ctx.answerCbQuery();
   const callbackData = ctx.match[0];
+  // Защита от перехвата админских команд
   if (callbackData.startsWith('select_cat_final_') || callbackData.startsWith('cat_final_')) {
       return; 
   }
   const categoryId = callbackData.split('_').pop();
-  // 🟢 ДОБАВЛЯЕМ ПРОВЕРКУ КОРРЕКТНОСТИ ID
+  
   if (!mongoose.Types.ObjectId.isValid(categoryId)) {
-    await ctx.answerCbQuery('⚠️ Ошибка: Некорректный ID категории.');
-    console.error('Ошибка: Некорректный ID категории:', (categoryId));
-
+    await ctx.answerCbQuery('⚠️ Ошибка: Некорректный ID.');
     return;
-}
+  }
 
   const category = await Category.findById(categoryId);
-  // 2. Находим товары и СОРТИРУЕМ по названию (name) по алфавиту
-  const products = await Product.find({ categoryId }).sort({ name: 1 }); // 1 = по возрастанию (A-Z)
-  // 3. Готовим кнопки товаров
-
+  const products = await Product.find({ categoryId }).sort({ name: 1 });
+  
   const buttons = products.map(p => [{ text: p.name, callback_data: `prod_${p._id}` }]);
-  const messageText = `📝 Вы выбрали категорию *${category.emoji} ${category.name}*. Выберите товар для добавления в опись:`;
+  const messageText = `📝 Вы выбрали категорию *${category.emoji} ${category.name}*. Выберите товар:`;
+  
   await ctx.editMessageText(messageText, {
         parse_mode: 'Markdown',
         reply_markup: { inline_keyboard: buttons }
-
   });
 });
 
-// --- Обработка выбора товара ---
+// --- Выбор товара ---
 bot.action(/prod_.+/, async (ctx) => {
   const productId = ctx.match[0].replace('prod_', '');
   const product = await Product.findById(productId);
@@ -345,29 +287,24 @@ bot.action(/prod_.+/, async (ctx) => {
     await user.save();
     await ctx.reply('Введите название своего товара:');
   } else {
-    user.currentOrder.push({ product: product.name, quantity: 0, total: 0 }); // <--- ИНИЦИАЛИЗАЦИЯ    
+    user.currentOrder.push({ product: product.name, quantity: 0, total: 0 });    
     user.currentStep = 'awaiting_quantity';
     await user.save();
     await ctx.reply(`Введите количество для "${product.name}" (в штуках):`);
   }
 });
 
-// --- Текстовые ответы пользователя ---
+// --- Текстовые ответы ---
 bot.on('text', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   const text = ctx.message.text.trim();
-    // 🟢 НОВАЯ ЛОГИКА: Если у пользователя нет телефона и он вводит текст — возможно, это номер
-  if (!user || !user.phone) {
-    // Проверяем, похож ли текст на номер (содержит цифры, +, длина > 8)
-    const cleanedText = text.replace(/[^0-9+]/g, '');
-    
-    if (cleanedText.length >= 9 && /^[\d+]/.test(text)) {
-      console.log('DEBUG: Обнаружен ввод номера без нажатия кнопки:', cleanedText);
 
+  // Логика автоматического определения номера (если нет телефона)
+  if (!user || !user.phone) {
+    const cleanedText = text.replace(/[^0-9+]/g, '');
+    if (cleanedText.length >= 9 && /^[\d+]/.test(text)) {
       let formattedPhone = cleanedText;
-      if (!formattedPhone.startsWith('+')) {
-        formattedPhone = '+' + formattedPhone;
-      }
+      if (!formattedPhone.startsWith('+')) formattedPhone = '+' + formattedPhone;
 
       user.phone = formattedPhone;
       user.currentStep = 'idle';
@@ -377,43 +314,26 @@ bot.on('text', async (ctx) => {
       return showMainMenu(ctx);
     }
   }
-  switch (user.currentStep) {
 
-    // 🆕 АДМИН: Ожидание названия товара
+  switch (user.currentStep) {
     case 'awaiting_product_name':
-      // 1. Сохраняем введенное название во временное поле
       user.tempProductName = text;
-      // 2. ожидание выбора категории
       user.currentStep = 'awaiting_category_selection';
-      try {
       await user.save(); 
-        } catch (error) {
-            return ctx.reply('⚠️ Произошла ошибка при сохранении данных. Пожалуйста, повторите ввод названия.');
-        }
-      // 3. Показываем категории
       return showAdminCategorySelection(ctx);
 
-      
     case 'awaiting_category_selection':
-     // Если пользователь ввел текст, когда ждал нажатия кнопки,
-     // мы возвращаем его в главное меню или сообщаем об ошибке.
      user.currentStep = 'idle';
      await user.save();
-     return ctx.reply('❌ Ожидался выбор категории кнопкой. Действие отменено. Выберите команду из меню.');
+     return ctx.reply('❌ Ожидался выбор категории кнопкой. Действие отменено.');
 
     case 'idle':
-     // Общая обработка текста, если нет активных процессов.
      return showMainMenu(ctx);
 
-    // 🆕 АДМИН: Ожидание названия категории
     case 'awaiting_category_name':
-      // 1. Создаем новую категорию
       const newCategory = await Category.create({ name: text });
-        
-      // 2. Сбрасываем шаг
       user.currentStep = 'idle';
       await user.save();
-      
       return ctx.reply(`✅ Категория "${newCategory.name}" успешно добавлена!`);
 
     case 'awaiting_custom_product':
@@ -424,55 +344,47 @@ bot.on('text', async (ctx) => {
 
     case 'awaiting_quantity':
       const qty = parseInt(text);
-      if (!qty || qty <= 0) return ctx.reply('Введите корректное количество.');
+      if (!qty || qty <= 0) return ctx.reply('Введите корректное число.');
       user.currentOrder[user.currentOrder.length - 1].quantity = qty;
-      user.currentStep = 'awaiting_total'; // <-- ИЗМЕНЕНО: awaiting_price -> awaiting_total
+      user.currentStep = 'awaiting_total';
       await user.save();
-      return ctx.reply('💰 Введите *общую сумму* за эту позицию (например, 19.99):', { parse_mode: 'Markdown' }); // <-- ИЗМЕНЕНО: Текст запроса
+      return ctx.reply('💰 Введите *общую сумму* за эту позицию (например, 19.99):', { parse_mode: 'Markdown' });
 
-      case 'awaiting_total':
+    case 'awaiting_total':
       const total = parseFloat(text.replace(',', '.'));
       if (isNaN(total) || total < 0) return ctx.reply('Введите корректную сумму.');
-        // Рассчитываем и сохраняем total для позиции
-        user.currentOrder[user.currentOrder.length - 1].total = total;
-        user.currentStep = 'confirm_order';
-        await user.save();
+        
+      user.currentOrder[user.currentOrder.length - 1].total = total;
+      user.currentStep = 'confirm_order';
+      await user.save();
       return showOrderPreview(ctx, user);
 
-      case 'awaiting_new_phone':
-   console.log('DEBUG: Обработка ввода номера вручную');
-  console.log('DEBUG: Введённый текст:', text);
-        // Регулярное выражение для очистки строки от всего, кроме цифр
-        const cleanedText = text.replace(/[^0-9]/g, ''); 
-      
-      // Проверка: Должно быть не менее 9 цифр (для большинства стран)
+    // 🔥 ИСПРАВЛЕНИЕ: Обработка случая, если юзер пишет текст, когда мы ждем нажатия кнопок меню
+    case 'confirm_order':
+      return ctx.reply('👇 Пожалуйста, используйте кнопки меню под сообщением с описью (Добавить, Отправить, Отменить).');
+
+    case 'awaiting_new_phone':
+      const cleanedText = text.replace(/[^0-9]/g, ''); 
       if (cleanedText.length < 9) {
-         return ctx.reply('❌Пожалуйста, введите корректный номер телефона (не менее 9 цифр).');
+         return ctx.reply('❌ Введите корректный номер телефона (минимум 9 цифр).');
       }
 
-     // Форматируем номер, добавляя '+' в начало, если его нет (для удобства поиска)
-        let formattedPhone = text.trim();
-        if (!formattedPhone.startsWith('+')) {
-            formattedPhone = '+' + formattedPhone;
-        }
+      let formattedPhone = text.trim();
+      if (!formattedPhone.startsWith('+')) formattedPhone = '+' + formattedPhone;
 
-      // Сохраняем отформатированный номер
       user.phone = formattedPhone;
       user.currentStep = 'idle';
       await user.save();
       
-      await ctx.reply(`Ваш новый номер сохранён: ${formattedPhone}`);
+      await ctx.reply(`✅ Ваш новый номер сохранён: ${formattedPhone}`);
       return showMainMenu(ctx);
 
-        default:
-        // Если пользователь вводит произвольный текст, когда бот не ждет ответа.
-      return ctx.reply('🤔 Я не понимаю эту команду. Воспользуйтесь меню или выберите действие.');
+    default:
+      return ctx.reply('🤔 Я не понимаю эту команду. Воспользуйтесь меню.');
   }
 });
 
-
-
-// --- Удаление товара из описи ---
+// --- Удаление из описи ---
 bot.action(/del_\d+/, async (ctx) => {
   const index = parseInt(ctx.match[0].replace('del_', ''));
   const user = await User.findOne({ telegramId: ctx.from.id });
@@ -487,7 +399,7 @@ bot.action(/del_\d+/, async (ctx) => {
   }
 });
 
-// --- Добавить ещё товар ---
+// --- Добавить ещё ---
 bot.action('add_more', async (ctx) => {
   await ctx.answerCbQuery();
   await showCategorySelection(ctx);
@@ -499,12 +411,13 @@ bot.action('cancel_order', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   user.currentOrder = [];
   user.currentStep = 'idle';
+  user.lastOrderId = null; // 🔥 ИСПРАВЛЕНИЕ: Сбрасываем привязку к черновику
   await user.save();
   await ctx.reply('❌ Опись отменена.');
   await showMainMenu(ctx);
 });
 
-// --- Подтверждение и отправка (Сохранить/Обновить Черновик) ---
+// --- Сохранить как черновик (Предварительная отправка) ---
 bot.action('send_order', async (ctx) => {
     await ctx.answerCbQuery();
     const user = await User.findOne({ telegramId: ctx.from.id });
@@ -515,38 +428,32 @@ bot.action('send_order', async (ctx) => {
     
     let order;
 
-    // 1. Проверяем, есть ли ID последнего черновика и не был ли он уже отправлен
+    // 🔥 ИСПРАВЛЕНИЕ: Проверяем, существует ли черновик СЕЙЧАС (не был ли он удален или отправлен в другой сессии)
     if (user.lastOrderId) {
         const existingOrder = await Order.findById(user.lastOrderId);
-
-        // Если черновик существует и имеет статус 'nuevo' (не отправлен)
+        // Если черновик найден и он все еще 'nuevo'
         if (existingOrder && existingOrder.status === 'nuevo') {
-            // Обновляем существующий черновик
             order = await Order.findByIdAndUpdate(user.lastOrderId, {
                 clientPhone: currentPhone,
                 items: user.currentOrder,
                 totalSum: total,
-                // Статус остается 'nuevo'
             }, { new: true });
         }
     }
 
-    // Если черновик не был обновлен (потому что lastOrderId не было или заказ был sent/cancelled)
     if (!order) {
-        // 2. Создаем новый черновик
         order = await Order.create({
             userId: user._id,
             clientPhone: currentPhone,
             items: user.currentOrder,
             totalSum: total,
-            status: 'nuevo' // Новый черновик всегда 'nuevo'
+            status: 'nuevo' 
         });
     }
 
-    // Очищаем временную корзину
     user.currentOrder = [];
     user.currentStep = 'idle';
-    user.lastOrderId = order._id; // Обновляем/устанавливаем ID текущего черновика
+    user.lastOrderId = order._id; 
     await user.save();
 
     await ctx.editMessageText(
@@ -563,55 +470,46 @@ bot.action('send_order', async (ctx) => {
     );
 });
 
-// --- Редактирование заказа ---
+// --- Редактирование ---
 bot.action(/edit_order_.+/, async (ctx) => {
-    await ctx.answerCbQuery('Загружаю черновик для редактирования...');
+    await ctx.answerCbQuery('Загружаю черновик...');
     
-    // Получаем ID заказа из callback_data
     const orderId = ctx.match[0].replace('edit_order_', '');
-    
-    // Ищем заказ
     const order = await Order.findById(orderId);
-    const user = await User.findOne({ telegramId: ctx.from.id });
     
-    // Проверка, что заказ существует и является черновиком
+    // Проверка статуса
     if (!order || order.status !== 'nuevo') {
-        return ctx.editMessageText('⚠️ Этот заказ нельзя редактировать (он либо не существует, либо уже отправлен).', { reply_markup: {} });
+        return ctx.editMessageText('⚠️ Этот заказ нельзя редактировать (он уже отправлен).', { reply_markup: {} });
     }
     
-    // 1. Переносим содержимое заказа обратно во временную корзину пользователя
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    
+    // Восстанавливаем состояние
     user.currentOrder = order.items;
-    user.lastOrderId = orderId; // Сохраняем ID редактируемого заказа
-    user.currentStep = 'idle'; 
+    user.lastOrderId = orderId; 
+    user.currentStep = 'confirm_order'; // 🔥 ИСПРАВЛЕНИЕ: Ставим правильный статус, чтобы бот знал где мы
     await user.save();
     
-    // 2. Обновляем сообщение, чтобы показать текущее состояние описи
-    await ctx.editMessageText(`✏️ Вы вернулись к редактированию заказа ID ${orderId}. Добавьте или удалите позиции.`);
-
-    // 3. Показываем предпросмотр, используя временную корзину
+    await ctx.editMessageText(`✏️ Вы вернулись к редактированию заказа ID ${orderId}.`);
     return showOrderPreview(ctx, user); 
 });
 
-// --- Окончательная отправка заказа ---
+// --- Финальная отправка ---
 bot.action(/final_send_.+/, async (ctx) => {
-    await ctx.answerCbQuery('Отправляю заказ...');
+    await ctx.answerCbQuery('Отправляю...');
     
-    // Получаем ID заказа из callback_data
     const orderId = ctx.match[0].replace('final_send_', '');
-    
-    // Ищем заказ по ID
     const order = await Order.findById(orderId);
 
-    // Проверка, что заказ существует и еще не был отправлен
     if (!order || order.status !== 'nuevo') {
         return ctx.editMessageText('⚠️ Ошибка: Заказ не найден или уже отправлен.', { reply_markup: {} });
     }
     
-    // 1. Отправляем в Google Sheets
     if (sheetsClient) {
         const total = order.totalSum;
+        const itemsString = order.items.map(i => `${i.product} (${i.quantity}шт)`).join(', ');
         const values = [
-            [new Date().toLocaleString(), order.clientPhone, JSON.stringify(order.items), total]
+            [new Date().toLocaleString(), order.clientPhone, itemsString, total]
         ];
         
         try {
@@ -623,28 +521,31 @@ bot.action(/final_send_.+/, async (ctx) => {
             });
         } catch (error) {
             console.error('Ошибка записи в Google Sheets:', error);
-            // Продолжаем, даже если Google Sheets не сработал
         }
     }
 
-    // 2. Меняем статус на "отправлен"
     order.status = 'enviado'; 
     await order.save();
     
-    // Обновляем сообщение в чате
-    await ctx.editMessageText(`🚀 Опись ID ${orderId} *окончательно отправлена*! Изменения больше невозможны.`, { 
+    // 🔥 ИСПРАВЛЕНИЕ: Очищаем lastOrderId у пользователя, чтобы он случайно не перезаписал этот отправленный заказ
+    await User.findOneAndUpdate({ telegramId: ctx.from.id }, { lastOrderId: null, currentStep: 'idle' });
+
+    await ctx.editMessageText(`🚀 Опись ID ${orderId} *окончательно отправлена*!`, { 
         parse_mode: 'Markdown',
-        reply_markup: {} // Удаляем inline-кнопки
+        reply_markup: {} 
     });
     await showMainMenu(ctx);
 });
 
-// --- Глобальный обработчик ошибок ---
+// --- Callback для всех остальных ---
+bot.on('callback_query', async (ctx, next) => {
+    return next();
+});
+
 bot.catch((err, ctx) => {
   console.error('Bot error:', err);
   ctx.reply('⚠️ Произошла ошибка. Попробуйте ещё раз.');
 });
 
-// --- Запуск бота ---
 bot.launch();
 console.log('🚀 Telegram bot started...');

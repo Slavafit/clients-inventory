@@ -1,13 +1,24 @@
-// whatsapp.js
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
+const mongoose = require('mongoose');
+const { google } = require('googleapis');
+const fs = require('fs'); 
 
-// 🚨 Импорт моделей и UI-функций
 const User = require('./models/User');
 const Product = require('./models/Product');
+const Category = require('./models/Category');
+const Order = require('./models/Order');
+
+// Эти функции вы должны были создать отдельно, либо уберите этот импорт, если пишите их здесь
+// Я предполагаю, что они у вас есть, как в Telegram боте (но адаптированные под WhatsApp)
 const { showCategorySelection, showProductSelection } = require('./handlers/whatsappUI');
 const { sendTextMessage } = require('./whatsappClient');
+
+// --- Подключение к MongoDB ---
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('MongoDB error:', err.message));
 
 const app = express();
 app.use(bodyParser.json());
@@ -15,8 +26,18 @@ app.use(bodyParser.json());
 const PORT = process.env.PORT || 3000;
 const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 
+// --- Google Sheets API ---
+let sheetsClient = null;
+if (process.env.USE_GOOGLE_SHEETS === 'true' && fs.existsSync(process.env.GOOGLE_SHEETS_KEYFILE)) {
+  const auth = new google.auth.GoogleAuth({
+    keyFile: process.env.GOOGLE_SHEETS_KEYFILE,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  });
+  sheetsClient = google.sheets({ version: 'v4', auth });
+  console.log('✅ Google Sheets connected');
+}
+
 // --- 1. WEBHOOK ВЕРИФИКАЦИЯ (GET) ---
-// Необходим для настройки в Meta Dashboard
 app.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -37,195 +58,198 @@ app.get('/webhook', (req, res) => {
 app.post('/webhook', async (req, res) => {
     const data = req.body;
 
-    if (data.object === 'whatsapp_business_account') {
-        // Проверяем, что это сообщение, а не статус или другая нотификация
-        const changes = data.entry?.[0]?.changes?.[0];
-        const message = changes?.value?.messages?.[0];
-        const contacts = changes?.value?.contacts?.[0];
+    // Сразу отвечаем 200 OK, чтобы WhatsApp не слал повторы
+    res.sendStatus(200);
 
-        if (message && contacts) {
-            const whatsappId = message.from; // Номер телефона отправителя (ваш ID)
-            const userName = contacts.profile.name;
-            let userText = message.text?.body || ''; // Текстовое сообщение
-            let payload = ''; // Данные с кнопки/списка
+    try {
+        if (data.object === 'whatsapp_business_account') {
+            const changes = data.entry?.[0]?.changes?.[0];
+            const message = changes?.value?.messages?.[0];
+            const contacts = changes?.value?.contacts?.[0];
 
-            // 1. Извлечение payload, если это интерактивное сообщение
-            if (message.interactive) {
-                if (message.interactive.type === 'list_reply') {
-                    payload = message.interactive.list_reply.id;
+            if (message && contacts) {
+                const whatsappId = message.from; 
+                const userName = contacts.profile.name;
+                let userText = message.text?.body || ''; 
+                let payload = ''; 
+
+                // Обработка интерактивных сообщений (кнопки/списки)
+                if (message.interactive) {
+                    if (message.interactive.type === 'list_reply') {
+                        payload = message.interactive.list_reply.id;
+                    } else if (message.interactive.type === 'button_reply') {
+                        payload = message.interactive.button_reply.id;
+                    }
+                    // Текст сообщения игнорируем, если нажата кнопка
+                    userText = '';
                 }
-                // Для WhatsApp все интерактивные ответы обрабатываются как payload, 
-                // а не как текст, поэтому обнуляем userText
-                userText = '';
-            }
 
-            // 2. Найти или создать пользователя (ВАЖНО: Использовать whatsappId)
-            let user = await User.findOne({ whatsappId });
-            if (!user) {
-                user = await User.create({ whatsappId, name: userName, currentStep: 'idle' });
-            }
+                // 2. Найти или создать пользователя
+                // ⚠️ ВАЖНО: Убедитесь, что в модели User есть поля whatsappId и tempProductId
+                let user = await User.findOne({ whatsappId });
+                if (!user) {
+                    const formattedPhone = '+' + whatsappId; 
+                    user = await User.create({ 
+                        whatsappId, 
+                        name: userName, 
+                        currentStep: 'idle',
+                        phone: formattedPhone,
+                        currentOrder: []
+                    });
+                }
 
-            // 3. Главный маршрутизатор (замена switch в Telegraf)
-            await handleWhatsAppMessage(user, whatsappId, userText, payload);
+                // 3. Главный маршрутизатор
+                await handleWhatsAppMessage(user, whatsappId, userText, payload);
+            }
         }
+    } catch (error) {
+        console.error('❌ Ошибка в Webhook:', error);
     }
-    res.sendStatus(200); // Обязательно ответить 200, иначе Meta будет повторять запрос
 });
 
 
 /**
- * Центральный обработчик логики. Заменяет switch в bot.on('text') и bot.action.
+ * Центральный обработчик логики
  */
 async function handleWhatsAppMessage(user, whatsappId, text, payload) {
     const currentStep = user.currentStep;
+    const command = text ? text.trim().toLowerCase() : ''; 
 
-    // --- ОБРАБОТКА НАЖАТИЯ КНОПОК/СПИСКОВ (Payload) ---
+    // --- A. ОБРАБОТКА НАЖАТИЯ КНОПОК (Payload) ---
     if (payload) {
-        // 🚨 Начало новой описи (выбор категории)
+        // Выбор категории
         if (payload.startsWith('cat_')) {
             const categoryId = payload.split('_').pop();
-            // На этом этапе вам нужно вызвать функцию для показа товаров
-            const category = await Category.findById(categoryId);
+            // Проверка на валидность ID
+            if (!mongoose.Types.ObjectId.isValid(categoryId)) return;
 
-            // Переходим к показу товаров
+            const category = await Category.findById(categoryId);
+            if (!category) {
+                 return sendTextMessage(whatsappId, '⚠️ Ошибка: Категория не найдена.');
+            }
             return showProductSelection(whatsappId, categoryId, category.name);
         }
 
-        // 🚨 Выбор товара
+        // Выбор товара
         if (payload.startsWith('prod_')) {
             const productId = payload.split('_').pop();
+            // Проверка на валидность ID
+            if (!mongoose.Types.ObjectId.isValid(productId)) return;
+
             const product = await Product.findById(productId);
-            
             if (!product) {
-                return sendTextMessage(whatsappId, '⚠️ Ошибка: Товар не найден. Пожалуйста, начните сначала.');
+                return sendTextMessage(whatsappId, '⚠️ Ошибка: Товар не найден.');
             }
             
-            // 1. Сохраняем ID товара для следующего шага
+            // 🔥 СОХРАНЯЕМ ID ТОВАРА В БАЗУ, чтобы не потерять на следующем шаге
             user.tempProductId = productId; 
             user.currentStep = 'awaiting_quantity';
             await user.save();
             
-            return sendTextMessage(whatsappId, `Вы выбрали *${product.name}*. Теперь введите ТОЛЬКО ЧИСЛО, обозначающее количество (в штуках):`);
+            return sendTextMessage(whatsappId, `Вы выбрали *${product.name}*. \n\n🔢 Введите количество (числом):`);
         }
-        // 🚨 Добавление своего товара
+        
+        // Свой товар
         if (payload === 'add_custom_product') {
             user.currentStep = 'awaiting_custom_product';
             await user.save();
             return sendTextMessage(whatsappId, '✍️ Введите название товара (например, Свеча ароматическая):');
         }
-
-        // ... (Добавьте обработку других payload, например, 'add_more', 'finish_order')
-
     } 
-    // --- ОБРАБОТКА ТЕКСТОВОГО ВВОДА (Text) ---
+    
+    // --- B. ОБРАБОТКА ТЕКСТА (Text) ---
     else if (text) {
+        // Админские команды (простая реализация через текст, так как нет слэш-команд)
+        // ВАЖНО: Добавьте проверку user.role === 'admin' если нужно
+        if (command === 'админ категория') {
+             user.currentStep = 'awaiting_category_name';
+             await user.save();
+             return sendTextMessage(whatsappId, '📝 Введите название новой категории:');
+        }
+
         switch (currentStep) {
             case 'idle':
-                // Общая обработка текста в режиме ожидания (аналог bot.hears)
-                if (text.toLowerCase() === 'начать') {
-                    // 🚨 Заменяем startNewOrder Telegraf на showCategorySelection WhatsApp
+                if (command === 'начать' || command === 'start') {
                     user.currentOrder = [];
+                    user.lastOrderId = null; // Сброс черновика
                     await user.save();
                     return showCategorySelection(whatsappId); 
                 }
-                if (text.toLowerCase() === 'помощь') {
-                    // 🚨 Здесь можно отправить INSTRUCTIONS_TEXT через sendTextMessage
-                    // (Предполагая, что вы импортировали константу INSTRUCTIONS_TEXT)
-                    return sendTextMessage(whatsappId, '📋 ИНСТРУКЦИЯ...');
+                if (command === 'сменить номер') {
+                    user.currentStep = 'awaiting_new_phone';
+                    await user.save();
+                    return sendTextMessage(whatsappId, '📱 Введите новый номер телефона:');
                 }
-                return sendTextMessage(whatsappId, '👋 Привет! Напишите "Начать", чтобы создать опись, или "Помощь" для инструкции.');
+                return sendTextMessage(whatsappId, '👋 Привет! Напишите *Начать*, чтобы создать опись.');
 
             case 'awaiting_quantity':
-                // 1. Проверяем количество
-                const qty = parseInt(text.trim());
+                const qty = parseInt(command);
                 if (isNaN(qty) || qty <= 0) {
-                    return sendTextMessage(whatsappId, '⚠️ Некорректное количество. Введите только положительное число.');
+                    return sendTextMessage(whatsappId, '⚠️ Пожалуйста, введите корректное число (количество).');
                 }
                 
-                // 2. 🚨 Находим название товара по сохраненному ID
-                const productToOrder = await Product.findById(user.tempProductId);
-                // Имя товара берется из БД. Если не найдено, используем заглушку.
-                const productName = productToOrder ? productToOrder.name : "Неизвестный товар";
+                // 🔥 ВОССТАНАВЛИВАЕМ ТОВАР ИЗ БАЗЫ
+                let productName = "Неизвестный товар";
+                if (user.tempProductId) {
+                    const productToOrder = await Product.findById(user.tempProductId);
+                    if (productToOrder) productName = productToOrder.name;
+                } else {
+                    // Если вдруг tempProductId потерялся
+                    user.currentStep = 'idle';
+                    await user.save();
+                    return sendTextMessage(whatsappId, '⚠️ Ошибка: Товар потерян. Начните заново.');
+                }
                 
-                // 3. Добавляем в текущий заказ
+                // Добавляем (quantity есть, total пока 0)
                 user.currentOrder.push({ product: productName, quantity: qty, total: 0 }); 
                 
-                // 4. Очищаем tempProductId и переходим к сумме
-                user.tempProductId = null; // ОЧЕНЬ ВАЖНО ОЧИСТИТЬ!
+                // Сбрасываем tempProductId
+                user.tempProductId = null; 
                 user.currentStep = 'awaiting_total';
                 await user.save();
                 
-                return sendTextMessage(whatsappId, '💰 Теперь введите *общую сумму* за эту позицию (например, 19.99):');
+                return sendTextMessage(whatsappId, '💰 Введите *общую сумму* за эту позицию (например, 19.99):');
             
-            case 'awaiting_custom_product':
-                // Логика добавления своего товара (скопирована из index.js)
-                user.currentOrder.push({ product: text, quantity: 0, total: 0 });
-                user.currentStep = 'awaiting_quantity';
-                await user.save();
-                return sendTextMessage(whatsappId, 'Введите количество:');
-                // Пользователь ввел текст в неактивном состоянии. Предложите начать.
-                if (text.toLowerCase() === 'начать') {
-                    return showCategorySelection(whatsappId);
-                }
-                return sendTextMessage(whatsappId, '👋 Привет! Напишите "Начать", чтобы создать опись, или "Помощь" для инструкции.');
-            
-            case 'awaiting_quantity':
-                // ... (Логика обработки количества, как в Telegraf)
-                const quantity = parseInt(text.trim());
-                if (isNaN(quantity) || quantity <= 0) {
-                    return sendTextMessage(whatsappId, '⚠️ Некорректное количество. Введите только положительное число.');
-                }
-                // Находим tempProductId, добавляем в currentOrder, переводим в awaiting_total
-                // ... (тут нужно добавить логику из index.js)
-                user.currentStep = 'awaiting_total';
-                await user.save();
-                return sendTextMessage(whatsappId, 'Теперь введите ТОЛЬКО ЧИСЛО, обозначающее общую сумму (например, 1500):');
-                
             case 'awaiting_total':
-                // 1. Обработка суммы
                 const total = parseFloat(command.replace(',', '.'));
                 if (isNaN(total) || total < 0) {
-                    return sendTextMessage(whatsappId, '⚠️ Некорректная сумма. Введите только положительное число.');
+                    return sendTextMessage(whatsappId, '⚠️ Введите корректную сумму (число).');
                 }
                 
-                // 2. Обновляем последний добавленный элемент
-                user.currentOrder[user.currentOrder.length - 1].total = total;
+                // Обновляем сумму у последнего товара
+                if (user.currentOrder.length > 0) {
+                    user.currentOrder[user.currentOrder.length - 1].total = total;
+                }
                 
-                // 3. Переход к состоянию ожидания команды ("Добавить" или "Завершить")
                 user.currentStep = 'confirm_order';
                 await user.save();
                 
                 const currentTotal = user.currentOrder.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
                 
+                // Здесь лучше отправить кнопки, если WhatsApp API позволяет, 
+                // но пока используем текст для надежности
                 return sendTextMessage(whatsappId, 
-                    `✅ Товар добавлен! Текущая сумма описи: *${currentTotal.toFixed(2)}€*.\n\n` + 
-                    'Что дальше? Напишите *ДОБАВИТЬ* чтобы продолжить, или *ЗАВЕРШИТЬ* чтобы сохранить черновик и отправить.'
+                    `✅ Добавлено! Итого: *${currentTotal.toFixed(2)}€*.\n\n` + 
+                    '🔹 Напишите *ДОБАВИТЬ* — чтобы выбрать еще товар.\n' +
+                    '🔹 Напишите *ЗАВЕРШИТЬ* — чтобы сохранить опись.'
                 );
-            // 🚨 НОВЫЙ CASE: Обработка команд после добавления позиции (Замена Inline-кнопок)
+
             case 'confirm_order':
                 if (command === 'добавить') {
-                    // 1. Логика "Добавить ещё товар" (аналог bot.action('add_more'))
-                    user.currentStep = 'idle'; // Сброс для корректного перехода
+                    user.currentStep = 'idle'; // Временно в idle, чтобы сработал выбор категорий
                     await user.save();
-                    
-                    return showCategorySelection(whatsappId); // Начать выбор новой категории/товара
+                    return showCategorySelection(whatsappId); 
                     
                 } else if (command === 'завершить') {
-                    // 2. Логика "Сохранить черновик" (аналог bot.action('send_order'))
-                    
-                    if (!user || !user.currentOrder.length) {
-                        user.currentStep = 'idle';
-                        await user.save();
-                        return sendTextMessage(whatsappId, 'Ошибка: Опись пуста.');
+                    if (!user.currentOrder.length) {
+                        return sendTextMessage(whatsappId, '⚠️ Опись пуста. Напишите *Начать*.');
                     }
                     
                     const totalSum = user.currentOrder.reduce((s, i) => s + (parseFloat(i.total) || 0), 0);
                     let currentPhone = user.phone;
                     let order;
                     
-                    // --- ЛОГИКА СОХРАНЕНИЯ/ОБНОВЛЕНИЯ ЧЕРНОВИКА (КОПИРОВАНИЕ ИЗ index.js) ---
-                    
-                    // Поиск и обновление существующего черновика
+                    // Логика сохранения (Upsert)
                     if (user.lastOrderId) {
                         const existingOrder = await Order.findById(user.lastOrderId);
                         if (existingOrder && existingOrder.status === 'nuevo') {
@@ -237,10 +261,9 @@ async function handleWhatsAppMessage(user, whatsappId, text, payload) {
                         }
                     }
 
-                    // Создание нового черновика
                     if (!order) {
                         order = await Order.create({
-                            userId: user._id,
+                            userId: user._id, // Убедитесь, что User модель имеет _id
                             clientPhone: currentPhone,
                             items: user.currentOrder,
                             totalSum: totalSum,
@@ -248,67 +271,126 @@ async function handleWhatsAppMessage(user, whatsappId, text, payload) {
                         });
                     }
 
-                    // Очистка временной корзины
                     user.currentOrder = [];
-                    user.currentStep = 'awaiting_final_send'; // 🚨 НОВЫЙ ШАГ
                     user.lastOrderId = order._id;
+                    user.currentStep = 'awaiting_final_send'; 
                     await user.save();
                     
                     return sendTextMessage(whatsappId, 
-                        `✅ Опись сохранена как *Черновик* (ID: ${order._id}). Итого: ${totalSum.toFixed(2)}€\n\n` +
-                        'Что дальше? Напишите *ОТПРАВИТЬ*, чтобы окончательно зафиксировать заказ, или *РЕДАКТИРОВАТЬ*, чтобы начать с начала.'
+                        `💾 Черновик (ID: ${order._id}) сохранен.\nИтого: ${totalSum.toFixed(2)}€\n\n` +
+                        '🚀 Напишите *ОТПРАВИТЬ* для подтверждения.\n' +
+                        '✏️ Напишите *РЕДАКТИРОВАТЬ* для изменения.'
                     );
                     
                 } else {
-                    return sendTextMessage(whatsappId, '🤔 Введите *ДОБАВИТЬ* или *ЗАВЕРШИТЬ*.');
+                    return sendTextMessage(whatsappId, 'Введите *ДОБАВИТЬ* или *ЗАВЕРШИТЬ*.');
                 }
             
-            // 🚨 НОВЫЙ CASE: Ожидание команды на окончательную отправку
             case 'awaiting_final_send':
                 if (command === 'отправить') {
-                    // 3. Логика "Окончательно отправить" (аналог bot.action('final_send_'))
-                    const orderId = user.lastOrderId; // Берем ID из сохраненного поля
+                    const orderId = user.lastOrderId; 
                     const order = await Order.findById(orderId);
                     
                     if (!order || order.status !== 'nuevo') {
                         user.currentStep = 'idle';
                         await user.save();
-                        return sendTextMessage(whatsappId, '⚠️ Ошибка: Заказ не найден или уже отправлен.');
+                        return sendTextMessage(whatsappId, '⚠️ Заказ уже отправлен или не найден.');
                     }
                     
-                    // --- ЛОГИКА ОТПРАВКИ В GOOGLE SHEETS (КОПИРОВАНИЕ ИЗ index.js) ---
-                    // ВНИМАНИЕ: Для работы этой части вам нужно импортировать логику Google Sheets в whatsapp.js
-                    // (Предполагая, что вы это сделаете)
+                    // Google Sheets
+                    if (sheetsClient) {
+                        const total = order.totalSum;
+                        // Форматируем список товаров в строку
+                        const itemsString = order.items.map(i => `${i.product} (${i.quantity}шт)`).join(', ');
+                        
+                        const values = [
+                            [new Date().toLocaleString(), order.clientPhone, itemsString, total]
+                        ];
+                        
+                        try {
+                            await sheetsClient.spreadsheets.values.append({
+                                spreadsheetId: process.env.GOOGLE_SHEET_ID,
+                                range: 'Sheet1!A:D',
+                                valueInputOption: 'USER_ENTERED',
+                                requestBody: { values }
+                            });
+                        } catch (error) {
+                            console.error('Ошибка Google Sheets:', error);
+                        }
+                    }
                     
-                    // 1. Меняем статус на "отправлен"
                     order.status = 'enviado'; 
                     await order.save();
                     
-                    // 2. Сброс состояния
                     user.lastOrderId = null;
                     user.currentStep = 'idle';
                     await user.save();
                     
-                    return sendTextMessage(whatsappId, `🚀 Опись ID ${orderId} *окончательно отправлена*!`);
+                    return sendTextMessage(whatsappId, `🚀 Опись отправлена! Спасибо.`);
                     
                 } else if (command === 'редактировать') {
-                    // В WhatsApp проще начать с начала
-                    user.currentStep = 'idle';
-                    user.lastOrderId = null; // Очищаем ссылку на черновик
-                    await user.save();
-                    return sendTextMessage(whatsappId, '❌ Редактирование отменено. Начните новую опись командой "Начать".');
+                    // Возвращаем товары из заказа в корзину пользователя
+                    const order = await Order.findById(user.lastOrderId);
+                    if (order) {
+                        user.currentOrder = order.items;
+                        user.currentStep = 'confirm_order'; // Возвращаем на шаг выбора действий
+                        await user.save();
+                        return sendTextMessage(whatsappId, '✏️ Режим редактирования. Напишите *ДОБАВИТЬ* или *ЗАВЕРШИТЬ*.');
+                    } else {
+                        user.currentStep = 'idle';
+                        await user.save();
+                        return sendTextMessage(whatsappId, '⚠️ Ошибка черновика.');
+                    }
                 } else {
-                    return sendTextMessage(whatsappId, '🤔 Введите *ОТПРАВИТЬ* или *РЕДАКТИРОВАТЬ*.');
+                    return sendTextMessage(whatsappId, 'Введите *ОТПРАВИТЬ* или *РЕДАКТИРОВАТЬ*.');
                 }
 
+            case 'awaiting_custom_product':
+                user.currentOrder.push({ product: text, quantity: 0, total: 0 });
+                user.currentStep = 'awaiting_quantity';
+                // tempProductId здесь null, поэтому в awaiting_quantity нужно добавить проверку
+                // но так как мы пушим product сразу как имя, в awaiting_quantity логика восстановления имени не сработает
+                // ⚠️ УПРОЩЕНИЕ: Для кастомного товара мы сразу просим количество здесь
+                user.currentStep = 'awaiting_quantity_custom'; // Создадим временный шаг, чтобы не ломать логику
+                await user.save();
+                return sendTextMessage(whatsappId, 'Введите количество:');
+            
+            // Специальный шаг для кастомного товара, чтобы не путаться с tempProductId
+            case 'awaiting_quantity_custom':
+                 const cQty = parseInt(command);
+                 if (isNaN(cQty) || cQty <= 0) return sendTextMessage(whatsappId, 'Введите число.');
+                 
+                 // Обновляем последний элемент (это наш кастомный товар)
+                 user.currentOrder[user.currentOrder.length - 1].quantity = cQty;
+                 user.currentStep = 'awaiting_total';
+                 await user.save();
+                 return sendTextMessage(whatsappId, '💰 Введите общую сумму:');
+
+            case 'awaiting_category_name':
+                const newCategory = await Category.create({ name: text });
+                user.currentStep = 'idle';
+                await user.save();
+                return sendTextMessage(whatsappId, `✅ Категория "${newCategory.name}" создана!`);
+                
+            case 'awaiting_new_phone':
+                const cleanedText = text.replace(/[^0-9]/g, ''); 
+                if (cleanedText.length < 9) {
+                    return sendTextMessage(whatsappId, 'Слишком короткий номер.');
+                }
+                let formattedPhone = text.trim();
+                if (!formattedPhone.startsWith('+')) formattedPhone = '+' + formattedPhone;
+
+                user.phone = formattedPhone;
+                user.currentStep = 'idle';
+                await user.save();
+                return sendTextMessage(whatsappId, `Номер сохранён: ${formattedPhone}`);
+
             default:
-                // Неизвестный шаг, можно сбросить состояние
-                return sendTextMessage(whatsappId, 'Пожалуйста, следуйте инструкциям. Если что-то пошло не так, напишите "Начать".');
+                return sendTextMessage(whatsappId, 'Непонятная команда. Напишите *Начать*.');
         }
     }
 }
 
-
 app.listen(PORT, () => {
-    console.log(`🚀 WhatsApp Webhook Server запущен на порту ${PORT}`);
+    console.log(`🚀 WhatsApp Webhook Server running on port ${PORT}`);
 });

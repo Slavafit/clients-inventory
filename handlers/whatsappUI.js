@@ -1,7 +1,7 @@
 // handlers/whatsappUI.js (Вам нужно будет импортировать Product, Category и whatsappClient)
 
-const Category = require('../models/Category'); // Импорт из вашего проекта
-const Product = require('../models/Product');   // Импорт из вашего проекта
+const Category = require('../models/Category');
+const Product = require('../models/Product'); 
 const { sendListMessage, sendTextMessage } = require('../whatsappClient');
 
 /**
