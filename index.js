@@ -8,6 +8,7 @@ const Category = require('./models/Category');
 const Product = require('./models/Product');
 const User = require('./models/User');
 const Order = require('./models/Order');
+const adminService = require('./services/adminService');
 const { checkAuth } = require('./middlewares/checkAuth');
 const { checkAdmin } = require('./middlewares/checkAdmin');
 const { registerAuthHandlers } = require('./handlers/auth');
@@ -100,7 +101,27 @@ async function showOrderPreview(ctx, user) {
   });
 }
 
-// --- Инструкции ---
+// --- Обработчик для установки роли администратора (ТОЛЬКО ДЛЯ ПЕРВОНАЧАЛЬНОЙ НАСТРОЙКИ!) ---
+//Установите свой Telegram ID в BOT_ADMIN_ID в .env файле
+// bot.command('setadmin', async (ctx) => {
+//   if (ctx.from.id.toString() === process.env.BOT_ADMIN_ID) {
+//       await User.findOneAndUpdate({ telegramId: ctx.from.id }, { role: 'admin' }, { upsert: true });
+//       return ctx.reply('🎉 Вы назначены администратором!');
+//   }
+//   return ctx.reply('⛔ Недостаточно прав.');
+// });
+
+bot.command('makeadmin', async (ctx) => {
+    if (ctx.from.id !== Number(process.env.ADMIN_ID)) return;
+
+    const targetId = ctx.message.text.split(' ')[1];
+    if (!targetId) return ctx.reply('Введите ID: /makeadmin 123456');
+
+    await User.findOneAndUpdate({ telegramId: targetId }, { role: 'admin' });
+    ctx.reply(`✅ Пользователь ${targetId} теперь админ.`);
+});
+
+//инструкции
 bot.command('help', checkAuth(User), async (ctx) => {
     const sentMessage = await ctx.reply(INSTRUCTIONS_TEXT, { parse_mode: 'Markdown' });
     try {
@@ -125,6 +146,33 @@ bot.command('addprod', checkAdmin(User), async (ctx) => {
   user.tempCategoryId = null;
   await user.save();
   return ctx.reply('📝 Введите **название** нового товара:', { parse_mode: 'Markdown' });
+});
+
+// 1. Вход в режим поиска
+bot.command('admin', async (ctx) => {
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    if (user?.role !== 'admin' && ctx.from.id !== Number(process.env.ADMIN_ID)) return;
+
+    user.currentStep = 'admin_search_client';
+    await user.save();
+    ctx.reply('🔍 Введите номер телефона клиента (с +) для поиска заказа:');
+});
+
+
+// Обработка кнопки "Установить трек"
+bot.action(/admin_set_track_(.+)/, async (ctx) => {
+    const orderId = ctx.match[1];
+    const user = await User.findOne({ telegramId: ctx.from.id });
+    user.currentStep = 'admin_awaiting_track';
+    user.tempOrderId = orderId;
+    await user.save();
+    ctx.reply('Введите трек-номер для этого заказа:');
+});
+
+
+
+bot.on('callback_query', async (ctx, next) => {
+    return next();
 });
 
 // --- Обработчик кнопки "Создать опись" ---
@@ -314,8 +362,65 @@ bot.on('text', async (ctx) => {
       return showMainMenu(ctx);
     }
   }
-
   switch (user.currentStep) {
+    //  Обработка поиска и вывод заказа
+    case 'admin_search_client':
+            const order = await Order.findOne({ clientPhone: text.trim() }).sort({ createdAt: -1 });
+      if (!order) return ctx.reply('❌ Заказ не найден.');
+
+      user.tempOrderId = order._id; // Сохраняем ID заказа для админа
+      user.currentStep = 'idle';
+      await user.save();
+
+      ctx.reply(
+          `📄 Заказ от: ${order.createdAt.toLocaleDateString()}\n` +
+          `Статус: ${order.status}\n` +
+          `Сумма: ${order.totalSum}€\n` +
+          `Трек: ${order.trackingNumber || 'нет'}\n\n` +
+          `Выберите действие:`,
+          Markup.inlineKeyboard([
+              [Markup.button.callback('📦 Установить трек', `admin_set_track_${order._id}`)],
+              [Markup.button.callback('✅ Завершить (Entregado)', `admin_status_delivered_${order._id}`)]
+          ])
+      );
+      // Шаг: Админ ввел трек-номер
+    case 'admin_awaiting_track':
+        user.tempTrackNumber = text.trim(); // Сохраняем номер в базу
+        user.currentStep = 'admin_awaiting_track_link'; // Переходим к следующему шагу
+        await user.save();
+        
+        return ctx.reply('🔗 Шаг 2: Теперь введите ссылку на сервис отслеживания (или напишите "нет", если ссылки нет):');
+      // Шаг: Админ ввел ссылку
+    case 'admin_awaiting_track_link':
+          const link = text.toLowerCase().trim() === 'нет' ? '' : text.trim();
+          // Простая валидация ссылки (опционально)
+        if (link && !link.startsWith('http')) {
+            return ctx.reply('⚠️ Ссылка должна начинаться с http или https. Попробуйте снова или напишите "нет".');
+        }
+
+        // Вызываем общий сервис (adminService.js)
+        // Он сам обновит статус, сохранит данные и уведомит клиента (TG или WA)
+        try {
+            await adminService.setTracking(
+                user.tempAdminOrderId, 
+                { number: user.tempTrackNumber, url: link }, 
+                { bot } // Передаем bot для отправки уведомлений в TG
+            );
+
+            // Сброс состояния админа
+            user.currentStep = 'idle';
+            user.tempTrackNumber = null;
+            user.tempAdminOrderId = null;
+            await user.save();
+
+            return ctx.reply('✅ Трек-номер и ссылка сохранены. Клиент уведомлен.');
+        } catch (err) {
+            console.error(err);
+            user.currentStep = 'idle'; // Сбрасываем при ошибке, чтобы не застрять
+            await user.save();
+            return ctx.reply('❌ Произошла ошибка при сохранении трека.');
+        }
+        // 🆕 АДМИН: Ожидание названия товара
     case 'awaiting_product_name':
       user.tempProductName = text;
       user.currentStep = 'awaiting_category_selection';
@@ -335,7 +440,7 @@ bot.on('text', async (ctx) => {
       user.currentStep = 'idle';
       await user.save();
       return ctx.reply(`✅ Категория "${newCategory.name}" успешно добавлена!`);
-
+    // АДМИН: Ожидание названия товара
     case 'awaiting_custom_product':
       user.currentOrder.push({ product: text, quantity: 0, total: 0 });
       user.currentStep = 'awaiting_quantity';
@@ -524,7 +629,8 @@ bot.action(/final_send_.+/, async (ctx) => {
         }
     }
 
-    order.status = 'enviado'; 
+    // 2. Меняем статус на "в работе"
+    order.status = 'en tramito';
     await order.save();
     
     // 🔥 ИСПРАВЛЕНИЕ: Очищаем lastOrderId у пользователя, чтобы он случайно не перезаписал этот отправленный заказ
