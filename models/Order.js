@@ -3,7 +3,6 @@ const mongoose = require('mongoose');
 const orderSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   clientPhone: { type: String, required: true },
-  timestamp: { type: Date, default: Date.now },
   items: [
     {
       product: { type: String, required: true },
@@ -19,7 +18,8 @@ const orderSchema = new mongoose.Schema({
   },
   trackingNumber: { type: String, default: '' },
   trackingUrl: { type: String, default: '' },
-  updatedAt: { type: Date, default: Date.now }
+  }, {
+  timestamps: true 
 });
 
 module.exports = mongoose.model('Order', orderSchema);

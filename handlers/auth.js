@@ -35,7 +35,7 @@ const registerAuthHandlers = (bot, User, showMainMenu) => {
     
     // 1. Обработчик /start
     bot.start(async (ctx) => {
-            console.log('DEBUG: /start вызван');
+            //console.log('DEBUG: /start вызван');
 
         let user = await User.findOne({ telegramId: ctx.from.id });
 

@@ -8,16 +8,17 @@ const Category = require('./models/Category');
 const Product = require('./models/Product');
 const User = require('./models/User');
 const Order = require('./models/Order');
-const adminService = require('./services/adminService');
+// сервисы
+const adminService = require('./services/adminService'); // Убедитесь, что этот файл существует!
+const registerAdminHandlers = require('./handlers/admin');
 const { checkAuth } = require('./middlewares/checkAuth');
-const { checkAdmin } = require('./middlewares/checkAdmin');
 const { registerAuthHandlers } = require('./handlers/auth');
 const { callbackDebug } = require('./middlewares/callbackDebug');
 const { 
         showCategorySelection, 
         showAdminCategorySelection 
     } = require('./handlers/category');
-const { INSTRUCTIONS_TEXT } = require('./data/texts');
+//const { INSTRUCTIONS_TEXT } = require('./data/texts');
 
 // --- Подключение к MongoDB ---
 mongoose.connect(process.env.MONGO_URI)
@@ -63,12 +64,20 @@ if (process.env.USE_GOOGLE_SHEETS === 'true' && fs.existsSync(process.env.GOOGLE
 // --- Инициализация бота ---
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// 🟢 РЕГИСТРАЦИЯ ЛОГИКИ АВТОРИЗАЦИИ
-registerAuthHandlers(bot, User, showMainMenu);
 
 // --- Middleware ---
 bot.use(checkAuth(User));
 bot.use(callbackDebug());
+
+//Регистрируем админские хендлеры и ЛОГИКИ АВТОРИЗАЦИИ
+registerAdminHandlers(bot, User, showMainMenu, {
+  User,
+  Order,
+  Product,
+  Category,
+  adminService,
+  showAdminCategorySelection
+});
 
 // --- Главное меню ---
 async function showMainMenu(ctx) {
@@ -101,91 +110,17 @@ async function showOrderPreview(ctx, user) {
   });
 }
 
-// --- Обработчик для установки роли администратора (ТОЛЬКО ДЛЯ ПЕРВОНАЧАЛЬНОЙ НАСТРОЙКИ!) ---
-//Установите свой Telegram ID в BOT_ADMIN_ID в .env файле
-// bot.command('setadmin', async (ctx) => {
-//   if (ctx.from.id.toString() === process.env.BOT_ADMIN_ID) {
-//       await User.findOneAndUpdate({ telegramId: ctx.from.id }, { role: 'admin' }, { upsert: true });
-//       return ctx.reply('🎉 Вы назначены администратором!');
-//   }
-//   return ctx.reply('⛔ Недостаточно прав.');
-// });
-
-bot.command('makeadmin', async (ctx) => {
-    if (ctx.from.id !== Number(process.env.ADMIN_ID)) return;
-
-    const targetId = ctx.message.text.split(' ')[1];
-    if (!targetId) return ctx.reply('Введите ID: /makeadmin 123456');
-
-    await User.findOneAndUpdate({ telegramId: targetId }, { role: 'admin' });
-    ctx.reply(`✅ Пользователь ${targetId} теперь админ.`);
-});
-
-//инструкции
-bot.command('help', checkAuth(User), async (ctx) => {
-    const sentMessage = await ctx.reply(INSTRUCTIONS_TEXT, { parse_mode: 'Markdown' });
-    try {
-        await ctx.pinChatMessage(sentMessage.message_id);
-    } catch (e) {
-        console.error(`[ERROR] Не удалось закрепить сообщение: ${e.message}`);
-    }
-});
-
-// --- Админские команды ---
-bot.command('addcat', checkAdmin(User), async (ctx) => {
-  const user = await User.findOne({ telegramId: ctx.from.id });
-  user.currentStep = 'awaiting_category_name';
-  await user.save();
-  return ctx.reply('📝 Введите название новой категории:');
-});
-
-bot.command('addprod', checkAdmin(User), async (ctx) => {
-  const user = await User.findOne({ telegramId: ctx.from.id });
-  user.currentStep = 'awaiting_product_name';
-  user.tempProductName = null;
-  user.tempCategoryId = null;
-  await user.save();
-  return ctx.reply('📝 Введите **название** нового товара:', { parse_mode: 'Markdown' });
-});
-
-// 1. Вход в режим поиска
-bot.command('admin', async (ctx) => {
-    const user = await User.findOne({ telegramId: ctx.from.id });
-    if (user?.role !== 'admin' && ctx.from.id !== Number(process.env.ADMIN_ID)) return;
-
-    user.currentStep = 'admin_search_client';
-    await user.save();
-    ctx.reply('🔍 Введите номер телефона клиента (с +) для поиска заказа:');
-});
-
-
-// Обработка кнопки "Установить трек"
-bot.action(/admin_set_track_(.+)/, async (ctx) => {
-    const orderId = ctx.match[1];
-    const user = await User.findOne({ telegramId: ctx.from.id });
-    user.currentStep = 'admin_awaiting_track';
-    user.tempOrderId = orderId;
-    await user.save();
-    ctx.reply('Введите трек-номер для этого заказа:');
-});
-
-
-
-bot.on('callback_query', async (ctx, next) => {
-    return next();
-});
-
 // --- Обработчик кнопки "Создать опись" ---
 bot.hears('📦 Создать опись', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   user.currentOrder = [];
   user.currentStep = 'idle';
-  user.lastOrderId = null; // 🔥 ИСПРАВЛЕНИЕ: Сбрасываем ID старого черновика, чтобы не перезаписать его
+  user.lastOrderId = null; 
   await user.save();
   await showCategorySelection(ctx);
 });
 
-// --- 🔥 ИСПРАВЛЕНИЕ: Добавлен отсутствующий обработчик смены номера ---
+// --- Смена номера ---
 bot.hears('🔄 Изменить номер', async (ctx) => {
     const user = await User.findOne({ telegramId: ctx.from.id });
     user.currentStep = 'awaiting_new_phone';
@@ -193,7 +128,7 @@ bot.hears('🔄 Изменить номер', async (ctx) => {
     return ctx.reply('📱 Введите ваш новый номер телефона (например: +34123456789):');
 });
 
-// --- Просмотр отправлений ---
+// --- Просмотр отправлений (Добавлены статус, трек и ссылка) ---
 bot.hears('🧾 Мои отправления', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   let currentPhone = user.phone; 
@@ -203,18 +138,34 @@ bot.hears('🧾 Мои отправления', async (ctx) => {
   
   if (!currentPhone) return ctx.reply('⚠️ Пожалуйста, сначала привяжите номер телефона.');
 
+  // Сортируем: новые сверху
   const orders = await Order.find({ 
       clientPhone: currentPhone, 
-      status: { $ne: 'nuevo' }
-  }).sort({ timestamp: -1 });
+      status: { $ne: 'nuevo' } // Не показываем черновики
+  }).sort({ createdAt: -1 });
   
   if (!orders.length) return ctx.reply(`📭 У вас пока нет отправлений, связанных с номером ${currentPhone}.`);
 
-  let text = `📦 Ваши отправления (по номеру ${currentPhone}):\n\n`;
+  let text = `📦 *Ваши отправления (по номеру ${currentPhone}):*\n\n`;
+
   orders.forEach((o, i) => {
-     text += `#${i + 1} от ${o.timestamp.toLocaleString()} — ${o.totalSum.toFixed(2)}€\n`;
+     // Красивое форматирование даты
+     const date = o.createdAt ? o.createdAt.toLocaleDateString() : 'Неизвестно';
+     
+     // Проверяем наличие трека и ссылки. 
+     // Используем обратные кавычки ` ` для трека, чтобы его можно было скопировать кликом.
+     const trackInfo = o.trackingNumber ? `\n🚛 Трек: \`${o.trackingNumber}\`` : '';
+     const linkInfo = o.trackingUrl ? `\n🔗 [Отследить посылку](${o.trackingUrl})` : '';
+
+     text += `🔹 *Заказ #${i + 1} от ${date}*\n`;
+     text += `💰 Сумма: ${o.totalSum.toFixed(2)}€\n`;
+     text += `🚦 Статус: *${o.status}*\n`; 
+     text += `${trackInfo}${linkInfo}\n`;
+     text += `──────────────────\n`;
   });
-  await ctx.reply(text);
+
+  // Добавляем disable_web_page_preview, чтобы ссылки не создавали огромные превью
+  await ctx.reply(text, { parse_mode: 'Markdown', disable_web_page_preview: true });
 });
 
 // --- Просмотр черновиков ---
@@ -228,7 +179,7 @@ bot.hears('✏️ Мои черновики', async (ctx) => {
     const drafts = await Order.find({ 
         clientPhone: currentPhone, 
         status: 'nuevo'
-    }).sort({ timestamp: -1 });
+    }).sort({ createdAt: -1 });
 
     if (!drafts.length) return ctx.reply('🙌 У вас нет активных черновиков.');
 
@@ -236,7 +187,7 @@ bot.hears('✏️ Мои черновики', async (ctx) => {
     
     const draftButtons = drafts.map((d, i) => {
         return [{ 
-            text: `Черновик #${i + 1} от ${d.timestamp.toLocaleDateString()} (${d.totalSum.toFixed(2)}€)`, 
+            text: `Черновик #${i + 1} от ${d.createdAt.toLocaleDateString()} (${d.totalSum.toFixed(2)}€)`, 
             callback_data: `edit_order_${d._id}` 
         }];
     });
@@ -245,7 +196,7 @@ bot.hears('✏️ Мои черновики', async (ctx) => {
 });
 
 // --- Обработка добавления Custom Product ---
-bot.action('add_custom_product', checkAuth(User), async (ctx) => {
+bot.action('add_custom_product', async (ctx) => {
     await ctx.answerCbQuery();
     const user = await User.findOne({ telegramId: ctx.from.id });
     user.currentStep = 'awaiting_custom_product'; 
@@ -253,55 +204,10 @@ bot.action('add_custom_product', checkAuth(User), async (ctx) => {
     return ctx.editMessageText('✍️ Введите название товара (например, Свеча ароматическая):');
 });
 
-// --- Админ: Финальное добавление товара ---
-bot.action(/cat_final_.+|select_cat_final_.+/, checkAdmin(User), async (ctx) => {    
-    await ctx.answerCbQuery(); 
-
-    const callbackData = ctx.match[0];
-    const categoryId = callbackData.split('_').pop();
-
-    if (!mongoose.Types.ObjectId.isValid(categoryId)) {
-        return ctx.editMessageText(`⚠️ Ошибка ID.`);
-    }
-
-    try {
-        const user = await User.findOne({ telegramId: ctx.from.id });
-        const productName = user.tempProductName;
-        
-        if (!productName) {
-            user.currentStep = 'idle';
-            await user.save();
-            return ctx.editMessageText('⚠️ Ошибка: Название товара потеряно.');
-        }
-        
-        const category = await Category.findById(categoryId);
-        if (!category) {
-            user.currentStep = 'idle';
-            await user.save();
-            return ctx.editMessageText('⚠️ Ошибка: Категория не найдена.');
-        }
-
-        const newProduct = await Product.create({
-            categoryId: categoryId,
-            name: productName
-        });
-
-        user.tempProductName = null; 
-        user.currentStep = 'idle';
-        await user.save();
-        await ctx.editMessageText(`✅ Товар *${newProduct.name}* успешно добавлен в категорию *${category.name}*!`, { parse_mode: 'Markdown' });
-        
-    } catch (error) {
-        console.error('CRITICAL ERROR in add product:', error);
-        return ctx.editMessageText('❌ Ошибка при сохранении товара.');
-    }
-});
-
 // --- Выбор категории ---
 bot.action(/cat_.+/, async (ctx) => {
   await ctx.answerCbQuery();
   const callbackData = ctx.match[0];
-  // Защита от перехвата админских команд
   if (callbackData.startsWith('select_cat_final_') || callbackData.startsWith('cat_final_')) {
       return; 
   }
@@ -342,7 +248,7 @@ bot.action(/prod_.+/, async (ctx) => {
   }
 });
 
-// --- Текстовые ответы ---
+// --- ТЕКСТОВЫЕ ОТВЕТЫ (ГЛАВНЫЙ РОУТЕР) ---
 bot.on('text', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   const text = ctx.message.text.trim();
@@ -362,99 +268,34 @@ bot.on('text', async (ctx) => {
       return showMainMenu(ctx);
     }
   }
+
   switch (user.currentStep) {
-    //  Обработка поиска и вывод заказа
-    case 'admin_search_client':
-            const order = await Order.findOne({ clientPhone: text.trim() }).sort({ createdAt: -1 });
-      if (!order) return ctx.reply('❌ Заказ не найден.');
-
-      user.tempOrderId = order._id; // Сохраняем ID заказа для админа
-      user.currentStep = 'idle';
-      await user.save();
-
-      ctx.reply(
-          `📄 Заказ от: ${order.createdAt.toLocaleDateString()}\n` +
-          `Статус: ${order.status}\n` +
-          `Сумма: ${order.totalSum}€\n` +
-          `Трек: ${order.trackingNumber || 'нет'}\n\n` +
-          `Выберите действие:`,
-          Markup.inlineKeyboard([
-              [Markup.button.callback('📦 Установить трек', `admin_set_track_${order._id}`)],
-              [Markup.button.callback('✅ Завершить (Entregado)', `admin_status_delivered_${order._id}`)]
-          ])
-      );
-      // Шаг: Админ ввел трек-номер
-    case 'admin_awaiting_track':
-        user.tempTrackNumber = text.trim(); // Сохраняем номер в базу
-        user.currentStep = 'admin_awaiting_track_link'; // Переходим к следующему шагу
-        await user.save();
-        
-        return ctx.reply('🔗 Шаг 2: Теперь введите ссылку на сервис отслеживания (или напишите "нет", если ссылки нет):');
-      // Шаг: Админ ввел ссылку
-    case 'admin_awaiting_track_link':
-          const link = text.toLowerCase().trim() === 'нет' ? '' : text.trim();
-          // Простая валидация ссылки (опционально)
-        if (link && !link.startsWith('http')) {
-            return ctx.reply('⚠️ Ссылка должна начинаться с http или https. Попробуйте снова или напишите "нет".');
-        }
-
-        // Вызываем общий сервис (adminService.js)
-        // Он сам обновит статус, сохранит данные и уведомит клиента (TG или WA)
-        try {
-            await adminService.setTracking(
-                user.tempAdminOrderId, 
-                { number: user.tempTrackNumber, url: link }, 
-                { bot } // Передаем bot для отправки уведомлений в TG
-            );
-
-            // Сброс состояния админа
-            user.currentStep = 'idle';
-            user.tempTrackNumber = null;
-            user.tempAdminOrderId = null;
-            await user.save();
-
-            return ctx.reply('✅ Трек-номер и ссылка сохранены. Клиент уведомлен.');
-        } catch (err) {
-            console.error(err);
-            user.currentStep = 'idle'; // Сбрасываем при ошибке, чтобы не застрять
-            await user.save();
-            return ctx.reply('❌ Произошла ошибка при сохранении трека.');
-        }
-        // 🆕 АДМИН: Ожидание названия товара
-    case 'awaiting_product_name':
-      user.tempProductName = text;
-      user.currentStep = 'awaiting_category_selection';
-      await user.save(); 
-      return showAdminCategorySelection(ctx);
-
-    case 'awaiting_category_selection':
-     user.currentStep = 'idle';
-     await user.save();
-     return ctx.reply('❌ Ожидался выбор категории кнопкой. Действие отменено.');
-
-    case 'idle':
-     return showMainMenu(ctx);
-
-    case 'awaiting_category_name':
-      const newCategory = await Category.create({ name: text });
-      user.currentStep = 'idle';
-      await user.save();
-      return ctx.reply(`✅ Категория "${newCategory.name}" успешно добавлена!`);
-    // АДМИН: Ожидание названия товара
+    
+    // --- ПОЛЬЗОВАТЕЛЬ: Свой товар ---
     case 'awaiting_custom_product':
       user.currentOrder.push({ product: text, quantity: 0, total: 0 });
       user.currentStep = 'awaiting_quantity';
       await user.save();
       return ctx.reply('Введите количество:');
 
+    // --- ПОЛЬЗОВАТЕЛЬ: Количество ---
     case 'awaiting_quantity':
       const qty = parseInt(text);
       if (!qty || qty <= 0) return ctx.reply('Введите корректное число.');
+      
+      // Защита от пустого массива заказов
+      if (user.currentOrder.length === 0) {
+          user.currentStep = 'idle';
+          await user.save();
+          return ctx.reply('⚠️ Произошла ошибка. Начните опись заново.');
+      }
+
       user.currentOrder[user.currentOrder.length - 1].quantity = qty;
       user.currentStep = 'awaiting_total';
       await user.save();
       return ctx.reply('💰 Введите *общую сумму* за эту позицию (например, 19.99):', { parse_mode: 'Markdown' });
 
+    // --- ПОЛЬЗОВАТЕЛЬ: Сумма ---
     case 'awaiting_total':
       const total = parseFloat(text.replace(',', '.'));
       if (isNaN(total) || total < 0) return ctx.reply('Введите корректную сумму.');
@@ -464,24 +305,23 @@ bot.on('text', async (ctx) => {
       await user.save();
       return showOrderPreview(ctx, user);
 
-    // 🔥 ИСПРАВЛЕНИЕ: Обработка случая, если юзер пишет текст, когда мы ждем нажатия кнопок меню
     case 'confirm_order':
       return ctx.reply('👇 Пожалуйста, используйте кнопки меню под сообщением с описью (Добавить, Отправить, Отменить).');
 
     case 'awaiting_new_phone':
-      const cleanedText = text.replace(/[^0-9]/g, ''); 
-      if (cleanedText.length < 9) {
+      const cleanedPhone = text.replace(/[^0-9]/g, ''); 
+      if (cleanedPhone.length < 9) {
          return ctx.reply('❌ Введите корректный номер телефона (минимум 9 цифр).');
       }
 
-      let formattedPhone = text.trim();
-      if (!formattedPhone.startsWith('+')) formattedPhone = '+' + formattedPhone;
+      let fPhone = text.trim();
+      if (!fPhone.startsWith('+')) fPhone = '+' + fPhone;
 
-      user.phone = formattedPhone;
+      user.phone = fPhone;
       user.currentStep = 'idle';
       await user.save();
       
-      await ctx.reply(`✅ Ваш новый номер сохранён: ${formattedPhone}`);
+      await ctx.reply(`✅ Ваш новый номер сохранён: ${fPhone}`);
       return showMainMenu(ctx);
 
     default:
@@ -516,7 +356,7 @@ bot.action('cancel_order', async (ctx) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
   user.currentOrder = [];
   user.currentStep = 'idle';
-  user.lastOrderId = null; // 🔥 ИСПРАВЛЕНИЕ: Сбрасываем привязку к черновику
+  user.lastOrderId = null; 
   await user.save();
   await ctx.reply('❌ Опись отменена.');
   await showMainMenu(ctx);
@@ -533,10 +373,8 @@ bot.action('send_order', async (ctx) => {
     
     let order;
 
-    // 🔥 ИСПРАВЛЕНИЕ: Проверяем, существует ли черновик СЕЙЧАС (не был ли он удален или отправлен в другой сессии)
     if (user.lastOrderId) {
         const existingOrder = await Order.findById(user.lastOrderId);
-        // Если черновик найден и он все еще 'nuevo'
         if (existingOrder && existingOrder.status === 'nuevo') {
             order = await Order.findByIdAndUpdate(user.lastOrderId, {
                 clientPhone: currentPhone,
@@ -582,17 +420,15 @@ bot.action(/edit_order_.+/, async (ctx) => {
     const orderId = ctx.match[0].replace('edit_order_', '');
     const order = await Order.findById(orderId);
     
-    // Проверка статуса
     if (!order || order.status !== 'nuevo') {
         return ctx.editMessageText('⚠️ Этот заказ нельзя редактировать (он уже отправлен).', { reply_markup: {} });
     }
     
     const user = await User.findOne({ telegramId: ctx.from.id });
     
-    // Восстанавливаем состояние
     user.currentOrder = order.items;
     user.lastOrderId = orderId; 
-    user.currentStep = 'confirm_order'; // 🔥 ИСПРАВЛЕНИЕ: Ставим правильный статус, чтобы бот знал где мы
+    user.currentStep = 'confirm_order'; 
     await user.save();
     
     await ctx.editMessageText(`✏️ Вы вернулись к редактированию заказа ID ${orderId}.`);
@@ -629,11 +465,9 @@ bot.action(/final_send_.+/, async (ctx) => {
         }
     }
 
-    // 2. Меняем статус на "в работе"
     order.status = 'en tramito';
     await order.save();
     
-    // 🔥 ИСПРАВЛЕНИЕ: Очищаем lastOrderId у пользователя, чтобы он случайно не перезаписал этот отправленный заказ
     await User.findOneAndUpdate({ telegramId: ctx.from.id }, { lastOrderId: null, currentStep: 'idle' });
 
     await ctx.editMessageText(`🚀 Опись ID ${orderId} *окончательно отправлена*!`, { 
@@ -643,7 +477,7 @@ bot.action(/final_send_.+/, async (ctx) => {
     await showMainMenu(ctx);
 });
 
-// --- Callback для всех остальных ---
+// --- Callback для всех остальных (ловит необработанные) ---
 bot.on('callback_query', async (ctx, next) => {
     return next();
 });

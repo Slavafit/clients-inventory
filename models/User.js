@@ -13,11 +13,11 @@ const userSchema = new mongoose.Schema({
     default: 'user' 
   },
   
-  tempProductName: { type: String },
+  newProductName: { type: String },
   tempCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
   // ID выбранного товара для ожидания количества
   tempProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
-  tempAdminOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' }, // Для хранения ID заказа при установке трека
+  tempOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' }, // Для хранения ID заказа при установке трека
   tempTrackNumber: { type: String }, //для временного хранения трека
   currentOrder: [
     {

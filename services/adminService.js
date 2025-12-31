@@ -23,11 +23,13 @@ module.exports = {
         return await Order.findOne({ clientPhone: phone }).sort({ timestamp: -1 });
     },
 
-    async setTracking(orderId, trackNumber, providers) {
+    async setTracking(orderId, data, providers) {
+          const { trackNumber, url } = data;
+
         const order = await Order.findByIdAndUpdate(
-            orderId,
+                        orderId,
             { 
-                trackingNumber: number, 
+                trackingNumber: trackNumber, 
                 trackingUrl: url || '', 
                 status: 'enviado',
                 updatedAt: Date.now()
@@ -35,7 +37,7 @@ module.exports = {
             { new: true }
         );
         let msg = `📦 *Ваша посылка отправлена!*\n\n`;
-        msg += `🔢 Трек-номер: *${number}*\n`;
+        msg += `🔢 Трек-номер: *${trackNumber}*\n`;
         if (url) {
             msg += `🌐 Отследить можно здесь: ${url}`;
         }
@@ -43,7 +45,7 @@ module.exports = {
         return order;
     },
 
-    // 🟢 ДОБАВЛЕНО: Общая функция смены статуса
+    // 🟢 Общая функция смены статуса
     async updateStatus(orderId, newStatus, providers) {
         const order = await Order.findByIdAndUpdate(
             orderId, 
