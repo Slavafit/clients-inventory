@@ -1,5 +1,5 @@
 const { Markup } = require('telegraf');
-const { requestPhone } = require('../middlewares/checkAuth'); // Импортируем функцию запроса
+const { requestPhone } = require('./checkAuth'); // Импортируем функцию запроса
 
 // --- ФУНКЦИЯ ДЛЯ ПРОВЕРКИ И СОХРАНЕНИЯ КОНТАКТА ---
 const handleContact = (User, showMainMenu) => async (ctx) => {
@@ -20,10 +20,12 @@ const handleContact = (User, showMainMenu) => async (ctx) => {
 // --- ФУНКЦИЯ ДЛЯ СМЕНЫ НОМЕРА (Hears '🔄 Изменить номер') ---
 const handleChangePhone = (User) => async (ctx) => {
     const user = await User.findOne({ telegramId: ctx.from.id });
-    
-    // Сразу переводим в шаг ожидания ввода
+        if (!user) {
+            return ctx.reply('Ошибка: пользователь не найден. Нажмите /start');
+        }
+
+        // Сразу переводим в шаг ожидания ввода
     user.currentStep = 'awaiting_new_phone'; 
-    
     await user.save();
     
     // Запрашиваем ввод номера, убирая клавиатуру главного меню
@@ -47,7 +49,6 @@ const registerAuthHandlers = (bot, User, showMainMenu) => {
         
         // Если телефон отсутствует, запрашиваем его.
         if (!user.phone || user.phone === 'null' || user.phone === '') {
-    console.log('DEBUG: Нет телефона, вызываем requestPhone');
             await ctx.reply('Привет! 👋');
             return requestPhone(ctx); 
         }

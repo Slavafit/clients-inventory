@@ -12,7 +12,7 @@ const Order = require('./models/Order');
 const adminService = require('./services/adminService'); // Убедитесь, что этот файл существует!
 const registerAdminHandlers = require('./handlers/admin');
 const { checkAuth } = require('./middlewares/checkAuth');
-const { registerAuthHandlers } = require('./handlers/auth');
+const { registerAuthHandlers } = require('./middlewares/auth');
 const { callbackDebug } = require('./middlewares/callbackDebug');
 const { 
         showCategorySelection, 
@@ -69,8 +69,11 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(checkAuth(User));
 bot.use(callbackDebug());
 
-//Регистрируем админские хендлеры и ЛОГИКИ АВТОРИЗАЦИИ
-registerAdminHandlers(bot, User, showMainMenu, {
+// 🟢 РЕГИСТРАЦИЯ ВСЕЙ ЛОГИКИ АВТОРИЗАЦИИ
+registerAuthHandlers(bot, User, showMainMenu);
+
+// Регистрируем админские хендлеры
+registerAdminHandlers(bot, {
   User,
   Order,
   Product,
@@ -78,7 +81,6 @@ registerAdminHandlers(bot, User, showMainMenu, {
   adminService,
   showAdminCategorySelection
 });
-
 // --- Главное меню ---
 async function showMainMenu(ctx) {
   return ctx.reply('📋 Главное меню. Выберите действие:', Markup.keyboard([
@@ -118,14 +120,6 @@ bot.hears('📦 Создать опись', async (ctx) => {
   user.lastOrderId = null; 
   await user.save();
   await showCategorySelection(ctx);
-});
-
-// --- Смена номера ---
-bot.hears('🔄 Изменить номер', async (ctx) => {
-    const user = await User.findOne({ telegramId: ctx.from.id });
-    user.currentStep = 'awaiting_new_phone';
-    await user.save();
-    return ctx.reply('📱 Введите ваш новый номер телефона (например: +34123456789):');
 });
 
 // --- Просмотр отправлений (Добавлены статус, трек и ссылка) ---
@@ -447,10 +441,10 @@ bot.action(/final_send_.+/, async (ctx) => {
     }
     
     if (sheetsClient) {
-        const total = order.totalSum;
-        const itemsString = order.items.map(i => `${i.product} (${i.quantity}шт)`).join(', ');
+        const totalOrder = order.totalSum;
+        const itemsString = order.items.map(i => `${i.product} (${i.quantity}pc) (${i.total}€)`).join(', ');
         const values = [
-            [new Date().toLocaleString(), order.clientPhone, itemsString, total]
+            [new Date().toLocaleString(), order.clientPhone, itemsString, totalOrder]
         ];
         
         try {
@@ -478,7 +472,7 @@ bot.action(/final_send_.+/, async (ctx) => {
 });
 
 // --- Callback для всех остальных (ловит необработанные) ---
-bot.on('callback_query', async (ctx, next) => {
+bot.on('callback_query', async (next) => {
     return next();
 });
 
