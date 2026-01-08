@@ -62,8 +62,10 @@ module.exports = function registerAdminHandlers(bot, {
       await adminService.updateStatus(orderId, Newstatus, {
       bot
     });
-      await ctx.answerCbQuery('Готово');
-      await ctx.editMessageText(`✅ Статус заказа изменён на *${Newstatus}*`, { parse_mode: 'Markdown' });
+      await ctx.answerCbQuery('Статус изменен и клиент уведомлен');
+      await ctx.editMessageText(
+        `✅ Статус заказа *#${orderId.toString().slice(-4)}* изменён на: *${Newstatus.toUpperCase()}*`,
+        { parse_mode: 'Markdown' });
     } catch (err) {
       console.error(err);
       await ctx.answerCbQuery('Ошибка');

@@ -1,6 +1,7 @@
 const Order = require('../models/Order');
 const User = require('../models/User');
 
+//функция оповещения
 async function notifyClient(userId, message, providers = {}) {
     const user = await User.findById(userId);
     if (!user) return;
