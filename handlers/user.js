@@ -280,7 +280,16 @@ function registerUserHandlers(bot, {
         order.status = 'en tramito';
         await order.save();
         await User.findOneAndUpdate({ telegramId: ctx.from.id }, { lastOrderId: null, currentStep: 'idle' });
-
+        const adminId = process.env.ADMIN_ID;
+        if (adminId) {
+            const adminMsg = `🆕 **Новый заказ!**\n` +
+                            `📞 Клиент: ${User.phone}\n` +
+                            `💰 Сумма: ${order.totalSum.toFixed(2)}€\n` +
+                            `🆔 ID: \`${order._id}\``;
+            
+            // Используем ctx.telegram, чтобы отправить сообщение не пользователю, а админу
+            await ctx.telegram.sendMessage(adminId, adminMsg, { parse_mode: 'Markdown' });
+        }
         await ctx.editMessageText(`🚀 Опись ID ${orderId} отправлена!`);
         await showMainMenu(ctx);
     });
